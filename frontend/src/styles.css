@@ -326,8 +326,13 @@ button {
   padding: 28px 32px 80px;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   gap: 24px;
+}
+/* Centred when there is room, scrollable from the left edge when zoomed in. */
+.pages > .page {
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .page-counter {
@@ -781,6 +786,44 @@ button {
   }
   .tool-btn {
     padding: 0 8px;
+  }
+}
+@media (max-width: 700px) {
+  .topbar {
+    gap: 6px;
+    padding: 0 8px;
+  }
+  .brand span,
+  .tool-btn .label,
+  .download-btn .label,
+  .zoom-label {
+    display: none;
+  }
+  .toolbar {
+    gap: 6px;
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+  .btn.download-btn {
+    padding: 0 10px;
+  }
+  .pages {
+    padding: 12px 8px 60px;
+  }
+  .subbar {
+    height: auto;
+    min-height: 48px;
+    overflow-x: auto;
+  }
+  .format-bar {
+    flex-wrap: nowrap;
+  }
+  .format-bar .font-select {
+    width: 140px;
+  }
+  .page-counter {
+    right: 10px;
+    bottom: 10px;
   }
 }
 

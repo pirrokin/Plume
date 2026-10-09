@@ -162,6 +162,21 @@ export function DocumentView({ docId, onExit }: Props) {
     localStorage.setItem("plume.zoom", String(zoom));
   }, [zoom]);
 
+  // Small screens: start with the page fitting the width.
+  const fitted = useRef(false);
+  useEffect(() => {
+    const el = scroller.current;
+    if (!info || !el || fitted.current) return;
+    fitted.current = true;
+    const widest = Math.max(...info.pages.map((p) => p.width));
+    const available = el.clientWidth - 32;
+    if (widest * zoom > available) {
+      const fit = available / widest;
+      setZoom(ZOOMS.filter((z) => z <= fit + 0.001).pop() ?? fit);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info]);
+
   // Page text models, loaded when a page becomes visible and when it changes.
   const loadModel = useCallback(
     (index: number) => {
@@ -595,10 +610,10 @@ export function DocumentView({ docId, onExit }: Props) {
           </div>
           <div className="btn-group segmented">
             <button className={`tool-btn${tool === "edit" ? " on" : ""}`} onClick={() => setTool("edit")} title="Cliquer sur un texte pour le modifier">
-              <IconText /> Modifier
+              <IconText /> <span className="label">Modifier</span>
             </button>
             <button className={`tool-btn${tool === "add" ? " on" : ""}`} onClick={() => setTool("add")} title="Cliquer sur la page pour ajouter du texte (T)">
-              <IconTextAdd /> Ajouter du texte
+              <IconTextAdd /> <span className="label">Ajouter du texte</span>
             </button>
           </div>
           <div className="btn-group zoom">
@@ -613,8 +628,8 @@ export function DocumentView({ docId, onExit }: Props) {
             </button>
           </div>
         </div>
-        <button className="btn primary" onClick={() => void download()} title="Télécharger le PDF modifié (⌘S)">
-          <IconDownload size={16} /> Télécharger
+        <button className="btn primary download-btn" onClick={() => void download()} title="Télécharger le PDF modifié (⌘S)">
+          <IconDownload size={16} /> <span className="label">Télécharger</span>
         </button>
       </header>
 
