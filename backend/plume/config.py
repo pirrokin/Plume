@@ -26,7 +26,7 @@ RETENTION_HOURS = float(os.environ.get("PLUME_RETENTION_HOURS", "72"))
 
 def font_dirs() -> list[Path]:
     """Directories scanned for installed fonts, most specific first."""
-    dirs: list[Path] = [ROOT / "backend" / "fonts"]
+    dirs: list[Path] = [ROOT / "backend" / "fonts", DATA_DIR / "fonts"]
     extra = os.environ.get("PLUME_FONT_DIRS")
     if extra:
         dirs += [Path(p) for p in extra.split(os.pathsep) if p]

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from . import __version__, config
 from .fontindex import get_index
 from .fontnames import generic_class
+from .googlefonts import google_fonts
 from .store import MUPDF_LOCK, DocumentError, Store
 
 log = logging.getLogger("plume")
@@ -31,11 +32,22 @@ async def lifespan(_app: FastAPI):
     if removed:
         log.info("removed %d old documents", removed)
     # Build the font index in the background so that the first edit is fast.
-    threading.Thread(target=get_index, daemon=True).start()
+    threading.Thread(target=_warm_up, daemon=True).start()
     yield
 
 
 app = FastAPI(title="Plume", version=__version__, lifespan=lifespan)
+
+
+def _warm_up() -> None:
+    index = get_index()
+    gf = google_fonts()
+    gf.catalog(block=True)
+    # Servers without office fonts get metric-compatible open fonts.
+    for generic in ("sans", "serif", "mono"):
+        if index.generic_key(generic) is None:
+            for key in {"sans": ["arimo"], "serif": ["tinos"], "mono": ["cousine"]}[generic]:
+                gf.ensure(key)
 
 
 @app.exception_handler(DocumentError)

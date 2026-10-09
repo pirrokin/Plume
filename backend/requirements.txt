@@ -3,3 +3,4 @@ fastapi==0.143.0
 uvicorn[standard]
 python-multipart
 fonttools==4.66.1
+certifi

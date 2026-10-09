@@ -14,12 +14,16 @@ from pathlib import Path
 from fontTools.ttLib import TTCollection, TTFont
 
 from . import config
-from .fontnames import family_key, _style_info
+from .fontnames import _style_info, family_key
 
 log = logging.getLogger(__name__)
+logging.getLogger("fontTools").setLevel(logging.ERROR)
 
 _EXTS = (".ttf", ".otf", ".ttc", ".otc")
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
+
+# Characters whose advance widths describe the proportions of a typeface.
+PROFILE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 # Alternatives tried, in order, when a family is not installed.
 # Metric-compatible open fonts come right after the original.
@@ -70,6 +74,30 @@ GENERIC: dict[str, list[str]] = {
 # Families with a very large coverage, used for characters missing everywhere else.
 UNIVERSAL = ["arialunicodems", "notosans", "dejavusans", "lucidagrande"]
 
+# Well-made Latin text families considered as look-alikes for fonts we cannot get.
+SIMILAR_CANDIDATES = {
+    "sans": [
+        "Arial", "Helvetica", "Helvetica Neue", "Avenir", "Avenir Next", "Futura", "Gill Sans", "Optima",
+        "Verdana", "Tahoma", "Trebuchet MS", "Calibri", "Aptos", "Century Gothic", "Franklin Gothic Book",
+        "Franklin Gothic Medium", "Segoe UI", "Candara", "Corbel", "Lucida Grande", "Lucida Sans", "Arial Narrow",
+        "Gill Sans MT", "Tw Cen MT", "Montserrat", "Lato", "Open Sans", "Roboto", "Source Sans 3", "Public Sans",
+        "DejaVu Sans", "Liberation Sans", "Arimo", "Carlito", "Noto Sans", "Inter", "Poppins", "Raleway",
+        "Nunito", "Work Sans", "PT Sans", "Fira Sans", "Ubuntu", "Quicksand", "Mulish", "Rubik", "Manrope",
+        "DM Sans", "Josefin Sans", "Barlow", "Oswald", "Kanit", "Karla", "Libre Franklin", "IBM Plex Sans",
+    ],
+    "serif": [
+        "Times New Roman", "Times", "Georgia", "Garamond", "Palatino", "Book Antiqua", "Baskerville", "Cambria",
+        "Constantia", "Charter", "Didot", "Bodoni 72", "Hoefler Text", "Iowan Old Style", "Big Caslon",
+        "Century Schoolbook", "Bookman Old Style", "Liberation Serif", "Tinos", "Caladea", "DejaVu Serif",
+        "Noto Serif", "Merriweather", "Lora", "PT Serif", "Source Serif 4", "EB Garamond", "Crimson Text",
+        "Playfair Display", "Libre Baskerville", "Cormorant Garamond", "Gelasio", "Athelas", "Sitka Text",
+    ],
+    "mono": [
+        "Courier New", "Courier", "Menlo", "Monaco", "Consolas", "Andale Mono", "Liberation Mono", "Cousine",
+        "DejaVu Sans Mono", "Source Code Pro", "Roboto Mono", "Fira Mono", "JetBrains Mono", "IBM Plex Mono",
+    ],
+}
+
 # Families shown first in the font menu.
 POPULAR = [
     "Arial", "Helvetica", "Times New Roman", "Calibri", "Cambria", "Georgia", "Verdana",
@@ -94,6 +122,8 @@ class Face:
     cff: bool
     variable: bool
     keys: list[str] = field(default_factory=list)
+    # Advance widths (em) of PROFILE_CHARS (-1 when missing), then x-height and cap height.
+    profile: list[float] = field(default_factory=list)
 
     @property
     def ext(self) -> str:
@@ -156,6 +186,21 @@ def _describe(font: TTFont, path: str, index: int) -> Face | None:
     if "head" in font and font["head"].macStyle & 2:
         italic = True
     mono = bool("post" in font and font["post"].isFixedPitch)
+    profile: list[float] = []
+    try:
+        cmap = font.getBestCmap() or {}
+        hmtx = font["hmtx"].metrics
+        upem = font["head"].unitsPerEm or 1000
+        for ch in PROFILE_CHARS:
+            g = cmap.get(ord(ch))
+            profile.append(round(hmtx[g][0] / upem, 4) if g in hmtx else -1.0)
+        xh = cap = 0.0
+        if "OS/2" in font and getattr(font["OS/2"], "version", 0) >= 2:
+            xh = (font["OS/2"].sxHeight or 0) / upem
+            cap = (font["OS/2"].sCapHeight or 0) / upem
+        profile += [round(xh, 4), round(cap, 4)]
+    except Exception:
+        profile = []
     keys = []
     for n in (family, _best_name(name, 1), psname.split("-")[0] if psname else None):
         if n:
@@ -176,6 +221,7 @@ def _describe(font: TTFont, path: str, index: int) -> Face | None:
         cff="CFF " in font or "CFF2" in font,
         variable="fvar" in font,
         keys=keys,
+        profile=profile,
     )
 
 
@@ -207,9 +253,11 @@ class FontIndex:
         self.faces: dict[str, Face] = {}
         self.by_key: dict[str, list[Face]] = {}
         self.by_ps: dict[str, Face] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._loaded = False
         self._bytes_cache: dict[str, bytes] = {}
+        # Bumped whenever faces are added, so that users of the index can refresh.
+        self.generation = 0
 
     # ------------------------------------------------------------------ loading
     def ensure_loaded(self) -> "FontIndex":
@@ -261,6 +309,21 @@ class FontIndex:
                 self._add(Face(**fd))
         log.info("font index: %d faces in %d families", len(self.faces), len(self.by_key))
 
+    def add_directory(self, directory: Path) -> int:
+        """Index the fonts of a directory added at runtime (e.g. downloaded fonts)."""
+        self.ensure_loaded()
+        added = 0
+        with self._lock:
+            for path in sorted(Path(directory).glob("*")):
+                if path.suffix.lower() in _EXTS:
+                    for face in _scan_file(str(path)):
+                        if face.id not in self.faces:
+                            self._add(face)
+                            added += 1
+            if added:
+                self.generation += 1
+        return added
+
     def _add(self, face: Face) -> None:
         if face.id in self.faces:
             return
@@ -290,6 +353,40 @@ class FontIndex:
     def face_for_psname(self, psname: str) -> Face | None:
         self.ensure_loaded()
         return self.by_ps.get(psname.lower())
+
+    def similar_family(self, widths: dict[int, float], x_height: float | None, weight: int, italic: bool,
+                       generic: str = "sans", exclude: set[str] | None = None) -> tuple[str, str, float] | None:
+        """Installed family whose letter proportions are closest to the given widths.
+
+        `widths` maps indexes of PROFILE_CHARS to advance widths in em.
+        Returns (family key, family name, error) or None.
+        """
+        self.ensure_loaded()
+        if len(widths) < 6:
+            return None
+        allowed = {family_key(n) for n in SIMILAR_CANDIDATES.get(generic, SIMILAR_CANDIDATES["sans"])}
+        families: dict[str, list[Face]] = {}
+        for face in self.faces.values():
+            key = family_key(face.family)
+            if face.profile and key in allowed:
+                families.setdefault(key, []).append(face)
+        total = sum(widths.values()) or 1.0
+        best: tuple[str, str, float] | None = None
+        for key, faces in families.items():
+            if exclude and key in exclude:
+                continue
+            face = min(faces, key=lambda f: (f.italic != italic, abs(f.weight - weight), f.variable))
+            prof = face.profile
+            common = [(w, prof[i]) for i, w in widths.items() if prof[i] > 0]
+            if len(common) < 0.9 * len(widths):
+                continue
+            err = sum(abs(a - b) for a, b in common) / total
+            if x_height and prof[-2] > 0:
+                err += 0.5 * abs(x_height - prof[-2]) / x_height
+            err += 0.05 * (face.italic != italic) + abs(face.weight - weight) / 2000.0
+            if best is None or err < best[2]:
+                best = (key, face.family, err)
+        return best
 
     def resolve_family_key(self, key: str) -> str | None:
         """First installed family among `key` and its aliases."""

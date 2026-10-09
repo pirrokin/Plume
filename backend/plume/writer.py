@@ -9,6 +9,7 @@ import pymupdf
 
 from .docfonts import SYNTH_ITALIC_SKEW
 from .layout import Deco, Piece
+from .pdffonts import parse_tounicode
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ def write_pieces(page: pymupdf.Page, pieces: list[Piece], decos: list[Deco]) -> 
     if not pieces and not decos:
         return
     corr = textwriter_correction(page)
+    fonts_before = {f[0] for f in page.get_fonts(full=True)}
     groups: dict[tuple, pymupdf.TextWriter] = defaultdict(lambda: pymupdf.TextWriter(page.rect))
     italic_pieces: list[Piece] = []
     for piece in pieces:
@@ -87,6 +89,70 @@ def write_pieces(page: pymupdf.Page, pieces: list[Piece], decos: list[Deco]) -> 
         tw.write_text(page, color=_rgb(color), opacity=alpha, render_mode=mode, matrix=shear * corr)
     for d in decos:
         _draw_deco(page, d)
+    for xref, *_ in page.get_fonts(full=True):
+        if xref not in fonts_before:
+            fix_tounicode(page.parent, xref)
+
+
+# Code points that share their glyph with a more common character. MuPDF builds
+# the ToUnicode map of the fonts it embeds from the font's cmap and keeps the
+# highest code point, so a space comes back as U+00A0 and "-" as U+00AD.
+_CANONICAL = {
+    0x00A0: 0x0020, 0x2007: 0x0020, 0x202F: 0x0020, 0x2000: 0x0020, 0x2001: 0x0020, 0x2002: 0x0020,
+    0x2003: 0x0020, 0x2004: 0x0020, 0x2005: 0x0020, 0x2006: 0x0020, 0x2008: 0x0020, 0x2009: 0x0020,
+    0x200A: 0x0020, 0x00AD: 0x002D, 0x2010: 0x002D, 0x2011: 0x002D, 0x037E: 0x003B, 0x0387: 0x00B7,
+    0x2219: 0x00B7, 0x2126: 0x03A9, 0x2206: 0x0394, 0x2215: 0x002F, 0x02C9: 0x00AF, 0x03BC: 0x00B5,
+    0x2044: 0x002F, 0x2024: 0x002E,
+}
+
+
+def fix_tounicode(doc: pymupdf.Document, font_xref: int) -> bool:
+    """Map glyphs shared by several code points back to the common character."""
+    typ, val = doc.xref_get_key(font_xref, "ToUnicode")
+    if typ != "xref":
+        return False
+    tu_xref = int(val.split()[0])
+    try:
+        mapping = parse_tounicode(doc.xref_stream(tu_xref) or b"")
+    except Exception:
+        return False
+    present = {ord(t) for t in mapping.values() if len(t) == 1}
+    changed = False
+    for code, text in mapping.items():
+        if len(text) == 1:
+            canonical = _CANONICAL.get(ord(text))
+            if canonical is not None and canonical not in present:
+                mapping[code] = chr(canonical)
+                present.add(canonical)
+                changed = True
+    if changed:
+        doc.update_stream(tu_xref, _cmap_bytes(mapping))
+    return changed
+
+
+def _cmap_bytes(mapping: dict[int, str]) -> bytes:
+    def hex_text(t: str) -> str:
+        return t.encode("utf-16-be").hex().upper()
+
+    items = sorted(mapping.items())
+    lines = [
+        "/CIDInit /ProcSet findresource begin",
+        "12 dict begin",
+        "begincmap",
+        "/CIDSystemInfo <</Registry (Adobe) /Ordering (UCS) /Supplement 0>> def",
+        "/CMapName /Adobe-Identity-UCS def",
+        "/CMapType 2 def",
+        "1 begincodespacerange",
+        "<0000> <FFFF>",
+        "endcodespacerange",
+    ]
+    for i in range(0, len(items), 100):
+        chunk = items[i:i + 100]
+        lines.append(f"{len(chunk)} beginbfchar")
+        lines.extend(f"<{code:04X}> <{hex_text(text)}>" for code, text in chunk)
+        lines.append("endbfchar")
+    lines += ["endcmap", "CMapName currentdict /CMap defineresource pop", "end", "end"]
+    return "\n".join(lines).encode("ascii")
 
 
 def _group_key(piece: Piece) -> tuple:

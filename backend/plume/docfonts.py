@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
-from .fontindex import Face, FontIndex, get_index
+from .fontindex import ALIASES, PROFILE_CHARS, Face, FontIndex, get_index
+from .googlefonts import google_fonts
 from .fontnames import css_weight_order, family_key, generic_class, parse_font_name, strip_subset
 from .pdffonts import PreparedFont, is_text_reliable, prepare_font
 
@@ -64,6 +65,8 @@ class Family:
         self.generic = generic
         self.sys_key = owner.index.resolve_family_key(key)
         self.exact_sys = self.sys_key == key
+        self.substitute: str | None = None  # look-alike used for characters missing from the PDF subset
+        self._similar_done = False
         self._slots: dict[tuple[int, bool], Slot] | None = None
 
     def slots(self) -> dict[tuple[int, bool], Slot]:
@@ -72,12 +75,44 @@ class Family:
             for xref, weight, italic in self.owner.embedded_for_key(self.key):
                 pf = self.owner.prepared(xref)
                 if pf.usable:
+                    # The font program knows its style better than names like "cmssbx10".
+                    if pf.font is not None and pf.font.is_bold and weight < 600:
+                        weight = 700
+                    if pf.font is not None and pf.font.is_italic:
+                        italic = True
                     slots.setdefault((weight, italic), Slot()).emb.append(xref)
+            if self.sys_key is None and not self._similar_done:
+                self._similar_done = True
+                self._find_similar(slots)
             if self.sys_key:
                 for face in self.owner.index.faces_for_key(self.sys_key):
                     slots.setdefault((face.weight, face.italic), Slot()).sys = face
             self._slots = slots
         return self._slots
+
+    def _find_similar(self, slots: dict[tuple[int, bool], Slot]) -> None:
+        """Pick the installed family closest to the embedded subset, for its missing letters."""
+        if google_fonts().lookup(self.key):
+            return  # the real font is being downloaded
+        candidates = sorted(
+            ((w, it, x) for (w, it), slot in slots.items() for x in slot.emb),
+            key=lambda t: (t[1], abs(t[0] - 400)),
+        )
+        for weight, italic, xref in candidates:
+            pf = self.owner.prepared(xref)
+            if not pf.usable or pf.font is None:
+                continue
+            widths = {
+                i: pf.font.glyph_advance(ord(c)) for i, c in enumerate(PROFILE_CHARS) if ord(c) in pf.codepoints
+            }
+            x_height = None
+            if ord("x") in pf.codepoints:
+                bbox = pf.font.glyph_bbox(ord("x"))
+                x_height = abs(bbox.y1 - bbox.y0) or None
+            found = self.owner.index.similar_family(widths, x_height, weight, italic, self.generic)
+            if found and found[2] < 0.2:
+                self.sys_key, self.substitute = found[0], found[1]
+            return
 
     def has_real_faces(self) -> bool:
         return bool(self.slots())
@@ -105,6 +140,7 @@ class Family:
             "generic": self.generic,
             "available": bool(slots),
             "substituted": not slots or (not any(s.emb for s in slots.values()) and not self.exact_sys),
+            "substitute": self.substitute,
             "bold": any(w >= 600 for w, _ in slots),
             "italic": any(it for _, it in slots),
         }
@@ -123,6 +159,7 @@ class DocFonts:
         self._span_cache: dict[tuple[str, int], FamRef] = {}
         self._fitz_sys: dict[str, pymupdf.Font] = {}
         self._chains: dict[tuple[str, int, bool], list[ChainItem]] = {}
+        self._generation = self.index.generation
 
     # ---------------------------------------------------------------- scanning
     def invalidate(self) -> None:
@@ -182,8 +219,40 @@ class DocFonts:
             return pf
 
     # ---------------------------------------------------------------- families
+    def _refresh_if_fonts_added(self) -> None:
+        """New fonts (e.g. downloaded from Google Fonts) may change family resolution."""
+        if self.index.generation != self._generation:
+            self._generation = self.index.generation
+            self._chains.clear()
+            for fam in self.families.values():
+                fam.sys_key = self.index.resolve_family_key(fam.key)
+                fam.exact_sys = fam.sys_key == fam.key
+                fam.substitute = None
+                fam._similar_done = False
+                fam._slots = None
+
+    def missing_family_keys(self) -> list[str]:
+        """Families used by the document that have no installed face of their own."""
+        keys = set(self._scan())
+        return sorted(k for k in keys if self.index.resolve_family_key(k) != k)
+
+    def request_downloads(self, keys: list[str] | None = None) -> list[str]:
+        """Start downloading the families available on Google Fonts; returns the ones started."""
+        gf = google_fonts()
+        started = []
+        for key in keys if keys is not None else self.missing_family_keys():
+            for candidate in ALIASES.get(key, [key]):
+                if self.index.resolve_family_key(candidate) == candidate:
+                    break  # already installed
+                if gf.lookup(candidate):
+                    gf.ensure(candidate)
+                    started.append(candidate)
+                    break
+        return started
+
     def family(self, key: str, name: str | None = None, generic: str | None = None) -> Family:
         with self._lock:
+            self._refresh_if_fonts_added()
             fam = self.families.get(key)
             if fam is None:
                 sys_key = self.index.resolve_family_key(key)
@@ -243,7 +312,15 @@ class DocFonts:
 
     def chain(self, key: str, weight: int, italic: bool) -> list[ChainItem]:
         ck = (key, int(weight), bool(italic))
+        if ck not in self._chains and self.index.resolve_family_key(key) != key:
+            # Give a pending Google Fonts download a moment before writing.
+            gf = google_fonts()
+            for candidate in ALIASES.get(key, [key]):
+                if gf.lookup(candidate):
+                    gf.ensure(candidate, wait=6.0)
+                    break
         with self._lock:
+            self._refresh_if_fonts_added()
             cached = self._chains.get(ck)
             if cached is not None:
                 return cached

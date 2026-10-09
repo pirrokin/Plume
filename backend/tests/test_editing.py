@@ -99,3 +99,14 @@ def test_rotated_cropped_page(sample_pdf):
     assert abs(new["x"] - block["x"]) < 0.5
     assert abs(new["baseline"] - block["baseline"]) < 0.5
     assert _find(model2, "Texte de contrôle")
+
+
+def test_written_text_round_trips(sample_pdf):
+    """Spaces, hyphens and semicolons must not come back as look-alike characters."""
+    doc = pymupdf.open(sample_pdf)
+    fonts = DocFonts(doc)
+    text = "Salle-G : prix; 12 € – « test »"
+    add_block(doc, fonts, 0, [{"text": text, "family": "arial", "size": 12}],
+              {"x": 72, "y": 600, "width": 400, "wrap": False, "align": "left"})
+    got = doc[0].get_text("text", clip=pymupdf.Rect(60, 585, 500, 610)).strip()
+    assert got == text

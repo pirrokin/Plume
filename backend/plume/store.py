@@ -42,6 +42,10 @@ class Document:
         self.doc: pymupdf.Document = pymupdf.open(self._path(self.version))
         self.fonts = DocFonts(self.doc)
         self._models: dict[tuple[int, int], dict] = {}
+        try:
+            self.fonts.request_downloads()
+        except Exception as exc:  # downloads are a nice-to-have
+            log.info("font downloads not started: %s", exc)
         self._revs: tuple[int, list[str]] | None = None
 
     # ---------------------------------------------------------------- state

@@ -339,6 +339,8 @@ def _compatible(p: Para, seg: Segment) -> float | None:
         return None
     if _NUMERIC_RE.match(seg.text) and _NUMERIC_RE.match(last.text):
         return None  # stacked amounts / dates are table cells, not wrapped prose
+    if " " not in seg.text.strip() and " " not in last.text.strip() and max(seg.x1, last.x1) - min(seg.x0, last.x0) < 6 * s:
+        return None  # stacked one-word labels (plans, diagrams) are separate texts
     first_token = seg.text.split(" ", 1)[0]
     if len(first_token) <= 4 and _BULLET_RE.match(first_token):
         return None
@@ -591,6 +593,8 @@ def _infer_single_line_alignment(blocks: list[dict]) -> None:
             same_left = abs(ox0 - x0) <= tol
             same_right = abs(ox1 - x1) <= tol
             same_center = abs((ox0 + ox1) / 2 - cx) <= tol
+            if same_left and same_right:
+                continue  # same width: says nothing about the alignment
             if same_left:
                 votes["left"] += 1
             elif same_right:
