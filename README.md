@@ -5,6 +5,11 @@ d'Acrobat Pro. On clique sur un paragraphe, on tape, on valide : le texte est r�
 police d'origine, avec la même taille, le même interligne et le même alignement, sans toucher
 au reste de la page.
 
+![Modification d'un paragraphe dans Plume](docs/screenshots/edition.png)
+
+*Un paragraphe en cours de modification : le texte reste dans sa police (Lora), sa taille et sa
+justification. En ligne : <https://plume.kinam.fr>.*
+
 ## Fonctionnalités
 
 - **Modification du texte par paragraphe** : le texte se recompose automatiquement (retour à la
@@ -45,6 +50,18 @@ au reste de la page.
   à la fermeture de l'onglet (après un délai de grâce de 45 s, qui permet de recharger la
   page), après 30 min sans signal, ou au bout de 12 h. Le bouton « Fermer » le supprime
   immédiatement.
+
+## En images
+
+Les captures ci-dessous montrent Plume ouvert sur [`docs/presentation-plume.pdf`](docs/presentation-plume.pdf),
+un PDF de présentation du projet (généré par `docs/make_presentation.py`).
+
+| | |
+|---|---|
+| ![Page d'accueil](docs/screenshots/accueil.png) | ![Document ouvert, miniatures des pages](docs/screenshots/document.png) |
+| **Accueil** : on dépose un PDF, rien n'est conservé sur le serveur. | **Document ouvert** : chaque bloc de texte est repéré, les pages se réorganisent dans la colonne de gauche. |
+| ![Modification d'un gros titre](docs/screenshots/titre.png) | ![Image sélectionnée](docs/screenshots/image.png) |
+| **Gros titre** : remplacé directement, dans sa police (Poppins SemiBold, 48 pt). | **Image** : sélectionnée, elle se déplace, se redimensionne ou se supprime. |
 
 ## Lancer Plume sur son ordinateur
 
