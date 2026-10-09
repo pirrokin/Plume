@@ -20,6 +20,10 @@ MAX_UPLOAD_MB = int(os.environ.get("PLUME_MAX_UPLOAD_MB", "200"))
 # Number of versions kept on disk for undo/redo.
 MAX_VERSIONS = int(os.environ.get("PLUME_MAX_VERSIONS", "60"))
 
+# Send the session cookie only over HTTPS (set to 1 behind a TLS proxy that
+# does not forward X-Forwarded-Proto).
+COOKIE_SECURE = os.environ.get("PLUME_COOKIE_SECURE", "0") in ("1", "true", "yes")
+
 # Documents untouched for this many hours are deleted at startup.
 RETENTION_HOURS = float(os.environ.get("PLUME_RETENTION_HOURS", "72"))
 

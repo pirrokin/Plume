@@ -126,6 +126,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new ApiError("Le serveur ne répond pas. Est-il démarré ?", 0);
   }
+  if (res.status === 401 && !url.startsWith("/api/login")) {
+    window.dispatchEvent(new Event("plume:unauthorized"));
+  }
   if (!res.ok) {
     let message = `Erreur ${res.status}`;
     try {
@@ -152,6 +155,9 @@ export const api = {
     form.append("file", file, file.name);
     return request<DocInfo>("/api/documents", { method: "POST", body: form });
   },
+  session: () => request<{ required: boolean; authenticated: boolean }>("/api/session"),
+  login: (password: string) => request<{ authenticated: boolean }>("/api/login", json("POST", { password })),
+  logout: () => request<{ authenticated: boolean }>("/api/logout", { method: "POST" }),
   info: (id: string) => request<DocInfo>(base(id)),
   page: (id: string, page: number) => request<PageModel>(`${base(id)}/pages/${page}/text`),
   edit: (id: string, page: number, blockId: string, body: { version: number; sig: string; runs: Run[]; box: Box }) =>

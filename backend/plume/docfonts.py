@@ -68,9 +68,17 @@ class Family:
         self.generic = generic
         self.sys_key = owner.index.resolve_family_key(key)
         self.exact_sys = self.sys_key == key
-        self.substitute: str | None = None  # look-alike used for characters missing from the PDF subset
+        # Installed family used in place of this one (metric-compatible alias or look-alike).
+        self.substitute: str | None = self._alias_name()
         self._similar_done = False
         self._slots: dict[tuple[int, bool], Slot] | None = None
+
+    def _alias_name(self) -> str | None:
+        if self.sys_key and self.sys_key != self.key:
+            faces = self.owner.index.faces_for_key(self.sys_key)
+            if faces:
+                return faces[0].family
+        return None
 
     def slots(self) -> dict[tuple[int, bool], Slot]:
         if self._slots is None:
@@ -239,7 +247,7 @@ class DocFonts:
             for fam in self.families.values():
                 fam.sys_key = self.index.resolve_family_key(fam.key)
                 fam.exact_sys = fam.sys_key == fam.key
-                fam.substitute = None
+                fam.substitute = fam._alias_name()
                 fam._similar_done = False
                 fam._slots = None
 

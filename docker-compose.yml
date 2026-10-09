@@ -1,0 +1,36 @@
+# Mise en ligne sur un domaine, avec HTTPS automatique (Caddy + Let's Encrypt).
+#   1. copier .env.example en .env et le remplir
+#   2. faire pointer le domaine (enregistrement A/AAAA) vers le serveur
+#   3. docker compose up -d --build
+services:
+  plume:
+    build: .
+    restart: unless-stopped
+    environment:
+      PLUME_PASSWORD: ${PLUME_PASSWORD:?Définir PLUME_PASSWORD dans .env}
+      PLUME_RETENTION_HOURS: ${PLUME_RETENTION_HOURS:-72}
+      PLUME_MAX_UPLOAD_MB: ${PLUME_MAX_UPLOAD_MB:-200}
+    volumes:
+      - plume-data:/data
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      - plume
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PLUME_DOMAIN: ${PLUME_DOMAIN:?Définir PLUME_DOMAIN dans .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  plume-data:
+  caddy-data:
+  caddy-config:

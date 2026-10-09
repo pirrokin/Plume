@@ -513,10 +513,13 @@ def _block_issues(lines: list[Segment], fonts: DocFonts) -> tuple[list[str], boo
     substitutes = []
     for f in sorted(families):
         fam = fonts.family(f)
+        has_embedded = any(slot.emb for slot in fam.slots().values())
         if not fam.has_real_faces():
             substitutes.append(f"{fam.name} → police générique")
-        elif fam.substitute:
+        elif fam.substitute and has_embedded:
             substitutes.append(f"{fam.name} → {fam.substitute} pour les lettres absentes")
+        elif fam.substitute:
+            substitutes.append(f"{fam.name} → {fam.substitute}")
     if substitutes:
         issues.append("Police d'origine incomplète ou indisponible : " + "; ".join(substitutes) + ".")
     return issues, editable
