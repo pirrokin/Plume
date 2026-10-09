@@ -7,6 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("PLUME_DATA_DIR", str(Path(__file__).resolve().parents[2] / "data" / "test"))
+# Reuse the OCR models of the development data directory.
+os.environ.setdefault("PLUME_TESSDATA", str(Path(__file__).resolve().parents[2] / "data" / "tessdata"))
 
 LOREM = (
     "Le traitement automatique des documents permet de gagner un temps considérable. "

@@ -11,7 +11,7 @@ import pymupdf
 from .docfonts import DocFonts
 from .extract import TEXT_FLAGS, Char, Segment, _page_segments
 from .layout import Glyph, LayoutResult, OutLine, Piece, layout, normalize_style
-from .writer import remove_chars, write_pieces
+from .writer import cover_rect, remove_chars, write_pieces
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +132,15 @@ def _restore(page: pymupdf.Page, fonts: DocFonts, chars: list[Char]) -> None:
     write_pieces(page, pieces, [])
 
 
+def scan_cover(segments: list[Segment]) -> list[pymupdf.Rect]:
+    """Areas of a scanned text block to paint over: each line with a small margin.
+
+    Line by line rather than the whole block, so that a bullet or a number
+    beside an indented first line is not erased.
+    """
+    return [pymupdf.Rect(seg.x0, seg.top, seg.x1, seg.bottom) + (-1.5, -1.0, 1.5, 1.0) for seg in segments]
+
+
 def edit_block(
     doc: pymupdf.Document,
     fonts: DocFonts,
@@ -139,19 +148,28 @@ def edit_block(
     segments: list[Segment],
     runs: list[dict],
     box: dict,
+    paper: str | None = None,
 ) -> EditReport:
-    """Replace the text of a block (given by its original segments) with `runs` laid out in `box`."""
+    """Replace the text of a block (given by its original segments) with `runs` laid out in `box`.
+
+    `paper` is the background colour of a scanned block: its area is painted
+    over before the new text is written.
+    """
     page = doc[page_no]
     result = layout(runs, box, fonts)
     align = box.get("align") or "left"
     keep: set[int] = set()
-    for i, (seg, line) in enumerate(zip(segments, result.lines)):
-        if _line_unchanged(seg, line, align):
-            keep.add(i)
-    if len(keep) == len(segments) == len(result.lines):
-        return EditReport(len(keep), 0, 0, 0, result.bbox)
+    if paper is None:
+        for i, (seg, line) in enumerate(zip(segments, result.lines)):
+            if _line_unchanged(seg, line, align):
+                keep.add(i)
+        if len(keep) == len(segments) == len(result.lines):
+            return EditReport(len(keep), 0, 0, 0, result.bbox)
     targets = [c for i, seg in enumerate(segments) if i not in keep for c in seg.chars]
     restored = _remove_verified(page, fonts, targets)
+    if paper is not None:
+        for rect in scan_cover(segments):
+            cover_rect(page, rect, paper)
     rewrite = set(range(len(result.lines))) - keep
     pieces, decos = _pieces_for_lines(result, rewrite)
     write_pieces(page, pieces, decos)
@@ -159,10 +177,15 @@ def edit_block(
     return EditReport(len(keep), len(rewrite), len(targets), restored, result.bbox)
 
 
-def delete_block(doc: pymupdf.Document, fonts: DocFonts, page_no: int, segments: list[Segment]) -> EditReport:
+def delete_block(
+    doc: pymupdf.Document, fonts: DocFonts, page_no: int, segments: list[Segment], paper: str | None = None
+) -> EditReport:
     page = doc[page_no]
     targets = [c for seg in segments for c in seg.chars]
     restored = _remove_verified(page, fonts, targets)
+    if paper is not None:
+        for rect in scan_cover(segments):
+            cover_rect(page, rect, paper)
     fonts.invalidate()
     return EditReport(0, 0, len(targets), restored, None)
 

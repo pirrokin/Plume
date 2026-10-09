@@ -200,6 +200,19 @@ def add(doc_id: str, page_no: int, body: AddBody) -> dict:
         return {"info": doc.info(), "page": doc.public_model(page_no), "report": _report(report)}
 
 
+class OcrBody(BaseModel):
+    version: int | None = None
+    languages: str | None = None
+
+
+@app.post("/api/documents/{doc_id}/pages/{page_no}/ocr")
+def ocr(doc_id: str, page_no: int, body: OcrBody) -> dict:
+    with MUPDF_LOCK:
+        doc = store.get(doc_id)
+        words = doc.ocr(page_no, body.version, body.languages)
+        return {"info": doc.info(), "page": doc.public_model(page_no), "words": words}
+
+
 @app.post("/api/documents/{doc_id}/undo")
 def undo(doc_id: str) -> dict:
     with MUPDF_LOCK:

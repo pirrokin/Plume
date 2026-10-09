@@ -47,6 +47,7 @@ class Document:
         except Exception as exc:  # downloads are a nice-to-have
             log.info("font downloads not started: %s", exc)
         self._revs: tuple[int, list[str]] | None = None
+        self._scanned: tuple[int, list[int]] | None = None
 
     # ---------------------------------------------------------------- state
     @property
@@ -104,6 +105,7 @@ class Document:
             "canUndo": self.cur > 0,
             "canRedo": self.cur < len(self.versions) - 1,
             "pages": pages,
+            "scanned": self.needs_ocr(),
         }
 
     # ---------------------------------------------------------------- reading
@@ -135,15 +137,48 @@ class Document:
         mat = pymupdf.Matrix(scale, scale)
         if not hide:
             return self.doc[page_no].get_pixmap(matrix=mat, alpha=False).tobytes("png")
-        segments = self.page_model(page_no)["internal"].get(hide)
-        if segments is None:
+        model = self.page_model(page_no)
+        segments = model["internal"].get(hide)
+        block = next((b for b in model["blocks"] if b["id"] == hide), None)
+        if segments is None or block is None:
             raise DocumentError("Bloc introuvable", 404)
-        from .writer import remove_chars
+        from .editor import scan_cover
+        from .writer import cover_rect, remove_chars
 
         tmp = pymupdf.open()
         tmp.insert_pdf(self.doc, from_page=page_no, to_page=page_no)
-        remove_chars(tmp[0], [c for s in segments for c in s.chars])
+        if block.get("scan"):
+            for rect in scan_cover(segments):
+                cover_rect(tmp[0], rect, block.get("bg") or "#ffffff")
+        else:
+            remove_chars(tmp[0], [c for s in segments for c in s.chars])
         return tmp[0].get_pixmap(matrix=mat, alpha=False).tobytes("png")
+
+    def ocr(self, page_no: int, version: int | None, languages: str | None = None) -> int:
+        """Recognise the text of a scanned page; returns the number of words found."""
+        from .ocr import DEFAULT_LANGUAGES, OcrError, recognize_page
+
+        self._check_version(version)
+        self._check_page(page_no)
+        words = {"n": 0}
+
+        def action():
+            try:
+                words["n"] = recognize_page(self.doc, self.fonts, page_no, languages or DEFAULT_LANGUAGES)
+            except OcrError as exc:
+                raise EditError(str(exc)) from exc
+            return None
+
+        self._commit(action)
+        return words["n"]
+
+    def needs_ocr(self) -> list[int]:
+        """Pages that look scanned and have no text layer yet (cached per version)."""
+        if self._scanned is None or self._scanned[0] != self.version:
+            from .ocr import page_needs_ocr
+
+            self._scanned = (self.version, [p.number for p in self.doc if page_needs_ocr(p)])
+        return self._scanned[1]
 
     def _check_page(self, page_no: int) -> None:
         if not 0 <= page_no < self.doc.page_count:
@@ -163,7 +198,7 @@ class Document:
             raise DocumentError("Le bloc a changé entre-temps, rechargez la page.", 409)
         if not block["editable"]:
             raise DocumentError("Ce bloc ne peut pas être modifié : " + " ".join(block["issues"]))
-        return segments
+        return segments, (block.get("bg") or "#ffffff") if block.get("scan") else None
 
     # ---------------------------------------------------------------- editing
     def _commit(self, action) -> EditReport:
@@ -193,13 +228,13 @@ class Document:
 
     def edit(self, page_no: int, block_id: str, version: int | None, sig: str | None, runs: list[dict], box: dict) -> EditReport:
         self._check_version(version)
-        segments = self._segments(page_no, block_id, sig)
-        return self._commit(lambda: edit_block(self.doc, self.fonts, page_no, segments, runs, box))
+        segments, paper = self._segments(page_no, block_id, sig)
+        return self._commit(lambda: edit_block(self.doc, self.fonts, page_no, segments, runs, box, paper))
 
     def delete(self, page_no: int, block_id: str, version: int | None, sig: str | None) -> EditReport:
         self._check_version(version)
-        segments = self._segments(page_no, block_id, sig)
-        return self._commit(lambda: delete_block(self.doc, self.fonts, page_no, segments))
+        segments, paper = self._segments(page_no, block_id, sig)
+        return self._commit(lambda: delete_block(self.doc, self.fonts, page_no, segments, paper))
 
     def add(self, page_no: int, version: int | None, runs: list[dict], box: dict) -> EditReport:
         self._check_version(version)

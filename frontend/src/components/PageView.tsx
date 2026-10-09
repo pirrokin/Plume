@@ -13,6 +13,9 @@ interface Props {
   tool: Tool;
   model: PageModel | undefined;
   active: ActiveEdit | null;
+  scanned: boolean;
+  ocrRunning: boolean;
+  onOcr(page: number): void;
   onVisible(index: number): void;
   onBlockClick(page: number, block: Block, click: { x: number; y: number }): void;
   onAddAt(page: number, x: number, y: number): void;
@@ -111,7 +114,7 @@ function PageViewInner(props: Props) {
             editing?.block?.id === b.id ? null : (
               <div
                 key={b.id}
-                className={`block-outline${b.editable ? "" : " locked"}${b.issues.length ? " warn" : ""}`}
+                className={`block-outline${b.editable ? "" : " locked"}${b.scan ? " scan" : b.issues.length ? " warn" : ""}`}
                 style={{
                   left: b.bbox[0] * zoom - 2,
                   top: b.bbox[1] * zoom - 1,
@@ -144,6 +147,22 @@ function PageViewInner(props: Props) {
           />
         )}
       </div>
+      {(props.scanned || props.ocrRunning) && (
+        <div className="scan-banner" onClick={(e) => e.stopPropagation()}>
+          {props.ocrRunning ? (
+            <>
+              <span className="spinner small" /> Reconnaissance du texte en cours…
+            </>
+          ) : (
+            <>
+              <span>Page numérisée : le texte n'est pas encore modifiable.</span>
+              <button className="btn primary small" onClick={() => props.onOcr(page.index)}>
+                Reconnaître le texte (OCR)
+              </button>
+            </>
+          )}
+        </div>
+      )}
       <div className="page-number">{page.index + 1}</div>
     </div>
   );

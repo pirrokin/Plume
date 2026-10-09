@@ -157,7 +157,7 @@ def _cmap_bytes(mapping: dict[int, str]) -> bytes:
 
 def _group_key(piece: Piece) -> tuple:
     render = piece.style.get("render", "fill")
-    mode = {"fill": 0, "stroke": 1, "fillstroke": 2}.get(render, 0)
+    mode = {"fill": 0, "stroke": 1, "fillstroke": 2, "invisible": 3}.get(render, 0)
     if piece.item.synth_bold and mode == 0:
         mode = 2
     return (piece.style["color"], float(piece.style["alpha"]), mode)
@@ -175,6 +175,14 @@ def _append(tw: pymupdf.TextWriter, piece: Piece) -> None:
         if not ch.isspace():
             tw.append((x, piece.y), ch, font=font, fontsize=size)
         x += adv
+
+
+def cover_rect(page: pymupdf.Page, rect: pymupdf.Rect, color: str) -> None:
+    """Paint a rectangle of paper colour, hiding what is underneath (scanned text)."""
+    shape = page.new_shape()
+    shape.draw_rect(rect)
+    shape.finish(color=None, fill=_rgb(color), width=0)
+    shape.commit(overlay=True)
 
 
 def _draw_deco(page: pymupdf.Page, d: Deco) -> None:

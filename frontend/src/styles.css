@@ -344,6 +344,13 @@ button {
 .block-outline.warn:hover {
   outline-color: #e2a400 !important;
 }
+.block-outline.scan:hover {
+  outline-color: #e07b00 !important;
+  background: rgba(224, 123, 0, 0.06);
+}
+.page.tool-edit:hover .block-outline.scan {
+  outline-color: rgba(224, 123, 0, 0.25);
+}
 .block-outline.locked {
   cursor: not-allowed;
 }
@@ -676,4 +683,32 @@ button {
   .tool-btn {
     padding: 0 8px;
   }
+}
+
+.scan-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px 8px 14px;
+  background: rgba(29, 35, 48, 0.9);
+  color: white;
+  border-radius: 10px;
+  font-size: 13px;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
+  z-index: 5;
+}
+.btn.small {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+.spinner.small {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
 }

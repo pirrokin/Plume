@@ -57,6 +57,7 @@ export function DocumentView({ docId, onExit }: Props) {
   const [format, setFormat] = useState<FormatState | null>(null);
   const [busy, setBusy] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
+  const [ocrPages, setOcrPages] = useState<Set<number>>(new Set());
   const controller = useRef<EditorController | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -215,6 +216,33 @@ export function DocumentView({ docId, onExit }: Props) {
   }, [info]);
 
   const closeEditor = useCallback(() => setActive(null), []);
+
+  const runOcr = useCallback(
+    async (page: number) => {
+      if (!info || ocrPages.has(page)) return;
+      if (activeRef.current && !(await commitActive())) return;
+      setOcrPages((s) => new Set(s).add(page));
+      try {
+        const res = await api.ocr(docId, page, info.version);
+        registerFamilies(res.page.families);
+        setInfo(res.info);
+        setModels((prev) => ({ ...prev, [page]: res.page }));
+        toasts.show(
+          res.words ? `${res.words} mots reconnus : cliquez sur un texte pour le modifier.` : "Aucun texte reconnu sur cette page.",
+          res.words ? "success" : "info",
+        );
+      } catch (e) {
+        fail(e);
+      } finally {
+        setOcrPages((s) => {
+          const next = new Set(s);
+          next.delete(page);
+          return next;
+        });
+      }
+    },
+    [info, ocrPages, commitActive, docId, toasts, fail],
+  );
 
   const undo = useCallback(async () => {
     if (activeRef.current) {
@@ -427,6 +455,9 @@ export function DocumentView({ docId, onExit }: Props) {
               tool={tool}
               model={models[p.index]}
               active={active}
+              scanned={info.scanned.includes(p.index)}
+              ocrRunning={ocrPages.has(p.index)}
+              onOcr={runOcr}
               onVisible={onVisible}
               onBlockClick={openBlock}
               onAddAt={addAt}

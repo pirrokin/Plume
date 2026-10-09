@@ -503,16 +503,22 @@ def _block_issues(lines: list[Segment], fonts: DocFonts) -> tuple[list[str], boo
     issues = []
     editable = True
     chars = [c for l in lines for c in l.chars]
-    if any(c.c == "�" for c in chars) or any(not c.reliable for c in chars if not c.c.isspace()):
+    if all(l.invisible for l in lines):
+        issues.append("Texte numérisé (OCR) : le passage modifié sera réécrit dans une police standard sur un fond uni.")
+        return issues, True
+    if any(c.c == "\ufffd" for c in chars) or any(not c.reliable for c in chars if not c.c.isspace()):
         issues.append("Une partie du texte est encodée sans correspondance Unicode : il ne peut pas être modifié sans risque.")
         editable = False
     families = {c.style[0] for c in chars}
-    replaced = sorted({fonts.family(f).name for f in families if not fonts.family(f).has_real_faces()})
-    if replaced:
-        issues.append("Police d'origine indisponible, remplacée par une police proche : " + ", ".join(replaced) + ".")
-    if all(l.invisible for l in lines):
-        issues.append("Texte invisible (couche OCR d'un document numérisé).")
-        editable = False
+    substitutes = []
+    for f in sorted(families):
+        fam = fonts.family(f)
+        if not fam.has_real_faces():
+            substitutes.append(f"{fam.name} → police générique")
+        elif fam.substitute:
+            substitutes.append(f"{fam.name} → {fam.substitute} pour les lettres absentes")
+    if substitutes:
+        issues.append("Police d'origine incomplète ou indisponible : " + "; ".join(substitutes) + ".")
     return issues, editable
 
 
@@ -547,6 +553,7 @@ def extract_page(page: pymupdf.Page, fonts: DocFonts) -> dict:
         x1 = max(l.x1 for l in p.lines)
         line_height = p.spacing if p.spacing else round(1.2 * max(l.size for l in p.lines), 2)
         issues, editable = _block_issues(p.lines, fonts)
+        scan = all(l.invisible for l in p.lines)
         block = {
             "id": bid,
             "sig": _signature(p.lines),
@@ -563,11 +570,60 @@ def extract_page(page: pymupdf.Page, fonts: DocFonts) -> dict:
             "runs": _clean_runs(_paragraph_runs(lines_model, wrap)),
             "editable": editable,
             "issues": issues,
+            "scan": scan,
         }
+        if scan:
+            _scan_style(page, block, fonts)
         blocks.append(block)
         internal[bid] = p.lines
     _infer_single_line_alignment(blocks)
     return {"blocks": blocks, "others": others, "internal": internal}
+
+
+SCAN_FAMILY = "helvetica"
+# Fonts tried for rewriting scanned text; the one whose widths match the scan wins.
+SCAN_CANDIDATES = ["helvetica", "arialnarrow", "timesnewroman", "georgia", "verdana", "couriernew"]
+
+
+def _scan_family(block: dict, fonts: DocFonts) -> str:
+    """Standard font whose letter widths best fit the scanned lines."""
+    import math
+
+    lines = [l for l in block["lines"] if l["text"].strip()]
+    ocr_width = sum(l["bbox"][2] - l["bbox"][0] for l in lines)
+    if ocr_width <= 0:
+        return SCAN_FAMILY
+    best, best_err = SCAN_FAMILY, None
+    for key in SCAN_CANDIDATES:
+        if fonts.index.resolve_family_key(key) is None and key != SCAN_FAMILY:
+            continue
+        chain = fonts.chain(key, 400, False)
+        font = chain[0].font
+        natural = sum(font.text_length(l["text"].strip(), fontsize=block["size"]) for l in lines)
+        if natural <= 0:
+            continue
+        err = abs(math.log(ocr_width / natural))
+        if key != SCAN_FAMILY:
+            err += 0.03  # prefer the plain default unless another font fits clearly better
+        if best_err is None or err < best_err:
+            best, best_err = key, err
+    return best
+
+
+def _scan_style(page: pymupdf.Page, block: dict, fonts: DocFonts) -> None:
+    """Scanned text: rewrite it in a standard font, in the ink colour, over the paper colour."""
+    from .ocr import sample_colors
+
+    bg, ink = sample_colors(page, pymupdf.Rect(block["bbox"]))
+    block["bg"] = bg
+    family = _scan_family(block, fonts)
+    for runs in [block["runs"]] + [l["runs"] for l in block["lines"]]:
+        for r in runs:
+            r["color"] = ink
+            r["render"] = "fill"
+            r["alpha"] = 1.0
+            r["spacing"] = 0.0
+            r["family"] = family
 
 
 def _infer_single_line_alignment(blocks: list[dict]) -> None:

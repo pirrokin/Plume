@@ -17,6 +17,7 @@ export interface DocInfo {
   canUndo: boolean;
   canRedo: boolean;
   pages: PageInfo[];
+  scanned: number[];
 }
 
 export interface Style {
@@ -60,6 +61,8 @@ export interface Block {
   runs: Run[];
   editable: boolean;
   issues: string[];
+  scan?: boolean;
+  bg?: string;
 }
 
 export interface FamilyInfo {
@@ -71,6 +74,7 @@ export interface FamilyInfo {
   bold?: boolean;
   italic?: boolean;
   popular?: boolean;
+  substitute?: string | null;
 }
 
 export interface PageModel {
@@ -159,6 +163,8 @@ export const api = {
     ),
   add: (id: string, page: number, body: { version: number; runs: Run[]; box: Box }) =>
     request<EditResult>(`${base(id)}/pages/${page}/blocks`, json("POST", body)),
+  ocr: (id: string, page: number, version: number) =>
+    request<{ info: DocInfo; page: PageModel; words: number }>(`${base(id)}/pages/${page}/ocr`, json("POST", { version })),
   undo: (id: string) => request<DocInfo>(`${base(id)}/undo`, { method: "POST" }),
   redo: (id: string) => request<DocInfo>(`${base(id)}/redo`, { method: "POST" }),
   fonts: () => request<FamilyInfo[]>("/api/fonts"),
