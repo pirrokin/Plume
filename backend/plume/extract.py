@@ -539,6 +539,7 @@ def extract_page(page: pymupdf.Page, fonts: DocFonts) -> dict:
     paras.sort(key=lambda p: (round(p.lines[0].top / 4), p.lines[0].x0))
     blocks = []
     internal = {}
+    raster = None  # page picture, made once if scanned blocks need colours
     for i, p in enumerate(paras):
         bid = f"b{i}"
         lines_model = []
@@ -576,7 +577,11 @@ def extract_page(page: pymupdf.Page, fonts: DocFonts) -> dict:
             "scan": scan,
         }
         if scan:
-            _scan_style(page, block, fonts)
+            if raster is None:
+                from .ocr import PageRaster
+
+                raster = PageRaster(page, 100, gray=False)
+            _scan_style(page, block, fonts, raster)
         blocks.append(block)
         internal[bid] = p.lines
     _infer_single_line_alignment(blocks)
@@ -613,11 +618,11 @@ def _scan_family(block: dict, fonts: DocFonts) -> str:
     return best
 
 
-def _scan_style(page: pymupdf.Page, block: dict, fonts: DocFonts) -> None:
+def _scan_style(page: pymupdf.Page, block: dict, fonts: DocFonts, raster) -> None:
     """Scanned text: rewrite it in a standard font, in the ink colour, over the paper colour."""
     from .ocr import sample_colors
 
-    bg, ink = sample_colors(page, pymupdf.Rect(block["bbox"]))
+    bg, ink = sample_colors(page, pymupdf.Rect(block["bbox"]), raster)
     block["bg"] = bg
     family = _scan_family(block, fonts)
     for runs in [block["runs"]] + [l["runs"] for l in block["lines"]]:

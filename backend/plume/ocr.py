@@ -80,43 +80,76 @@ def page_needs_ocr(page: pymupdf.Page) -> bool:
 
 
 # ---------------------------------------------------------------- image analysis
-def _gray_rows(pix: pymupdf.Pixmap, threshold: int) -> list[int]:
-    """Number of dark pixels in each row of a grey pixmap."""
-    w, h, n = pix.width, pix.height, pix.n
-    data = pix.samples
-    rows = []
-    for y in range(h):
-        row = data[y * pix.stride: y * pix.stride + w * n: n]
-        rows.append(sum(1 for v in row if v < threshold))
-    return rows
+_DARK_TABLES: dict[int, bytes] = {}
 
 
-def line_metrics(page: pymupdf.Page, rect: pymupdf.Rect, text: str) -> tuple[float, float]:
+def _dark_table(threshold: int) -> bytes:
+    """bytes.translate table turning pixels darker than `threshold` into 1, others into 0."""
+    t = _DARK_TABLES.get(threshold)
+    if t is None:
+        t = bytes(1 if v < threshold else 0 for v in range(256))
+        _DARK_TABLES[threshold] = t
+    return t
+
+
+class PageRaster:
+    """One picture of a page reused for many measurements.
+
+    Rendering a clip per line or per block is far too slow on a shared server;
+    one rendering of the page, then plain byte operations, is not.
+    """
+
+    def __init__(self, page: pymupdf.Page, dpi: int, gray: bool):
+        self.scale = dpi / 72.0
+        self.rotation = page.rotation
+        self.to_display = page.rotation_matrix
+        pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY if gray else pymupdf.csRGB, alpha=False)
+        self.n, self.w, self.h, self.stride = pix.n, pix.width, pix.height, pix.stride
+        self.samples = pix.samples  # one copy: the property copies on every access
+
+    def box(self, rect: pymupdf.Rect) -> tuple[int, int, int, int]:
+        """Pixel box of a rectangle given in unrotated page coordinates."""
+        r = rect.transform(self.to_display)
+        x0 = max(0, min(self.w, int(r.x0 * self.scale)))
+        x1 = max(0, min(self.w, int(r.x1 * self.scale + 0.999)))
+        y0 = max(0, min(self.h, int(r.y0 * self.scale)))
+        y1 = max(0, min(self.h, int(r.y1 * self.scale + 0.999)))
+        return x0, y0, x1, y1
+
+
+def line_metrics(page: pymupdf.Page, rect: pymupdf.Rect, text: str,
+                 raster: PageRaster | None = None) -> tuple[float, float]:
     """Estimate (baseline, font size) of a scanned text line from its pixels."""
-    dpi = 200
-    scale = dpi / 72.0
+    fallback = (rect.y1, rect.height * 0.75)
+    if raster is None or raster.rotation != 0 or raster.n != 1:
+        raster = PageRaster(page, 200, gray=True) if page.rotation == 0 else None
+    if raster is None:
+        return fallback
     clip = rect + (-1, -2, 1, 2)
-    try:
-        pix = page.get_pixmap(clip=clip, dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False)
-    except Exception:
-        return rect.y1, rect.height * 0.75
-    if pix.width < 2 or pix.height < 4:
-        return rect.y1, rect.height * 0.75
-    samples = pix.samples
-    values = sorted(samples[:: max(1, len(samples) // 4000)])
-    paper = values[int(len(values) * 0.9)] if values else 255
-    ink = values[int(len(values) * 0.02)] if values else 0
-    threshold = (paper + ink) / 2
-    rows = _gray_rows(pix, int(threshold))
-    peak = max(rows) if rows else 0
+    x0, y0, x1, y1 = raster.box(clip)
+    if x1 - x0 < 2 or y1 - y0 < 4:
+        return fallback
+    data, stride = raster.samples, raster.stride
+    sample = bytearray()
+    for y in range(y0, y1, max(1, (y1 - y0) // 12)):
+        sample += data[y * stride + x0: y * stride + x1: 3]
+    values = sorted(sample)
+    if not values:
+        return fallback
+    paper = values[int(len(values) * 0.9)]
+    ink = values[int(len(values) * 0.02)]
+    table = _dark_table(int((paper + ink) / 2))
+    rows = [data[y * stride + x0: y * stride + x1].translate(table).count(1) for y in range(y0, y1)]
+    peak = max(rows)
     if peak == 0:
-        return rect.y1, rect.height * 0.75
+        return fallback
+    scale = raster.scale
     dense = [i for i, c in enumerate(rows) if c >= 0.35 * peak]
     inked = [i for i, c in enumerate(rows) if c >= 0.04 * peak]
     base_row = dense[-1] + 1 if dense else len(rows)
     top_row = inked[0] if inked else 0
-    x_rows = [i for i in range(len(rows)) if rows[i] >= 0.5 * peak]
-    baseline = clip.y0 + base_row / scale
+    x_rows = [i for i, c in enumerate(rows) if c >= 0.5 * peak]
+    baseline = (y0 + base_row) / scale
     tall = any(c in text for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZbdfhklt0123456789ÉÈÀÇ")
     if tall and base_row > top_row:
         size = (base_row - top_row) / scale / 0.72
@@ -128,34 +161,30 @@ def line_metrics(page: pymupdf.Page, rect: pymupdf.Rect, text: str) -> tuple[flo
     return baseline, size
 
 
-def sample_colors(page: pymupdf.Page, rect: pymupdf.Rect) -> tuple[str, str]:
+def sample_colors(page: pymupdf.Page, rect: pymupdf.Rect, raster: PageRaster | None = None) -> tuple[str, str]:
     """Paper colour around `rect` and ink colour inside it, as #rrggbb."""
-    clip = (rect + (-3, -3, 3, 3)) & page.rect
-    try:
-        pix = page.get_pixmap(clip=clip, dpi=100, colorspace=pymupdf.csRGB, alpha=False)
-    except Exception:
+    if raster is None or raster.n != 3:
+        raster = PageRaster(page, 100, gray=False)
+    x0, y0, x1, y1 = raster.box(rect + (-3, -3, 3, 3))
+    if x1 - x0 < 5 or y1 - y0 < 5:
         return "#ffffff", "#000000"
-    w, h = pix.width, pix.height
-    if w < 3 or h < 3:
-        return "#ffffff", "#000000"
-    data = pix.samples
-    stride = pix.stride
-    border = []
-    for x in range(w):
-        for y in (0, 1, h - 2, h - 1):
-            i = y * stride + x * 3
-            border.append(tuple(data[i:i + 3]))
-    for y in range(h):
-        for x in (0, 1, w - 2, w - 1):
-            i = y * stride + x * 3
-            border.append(tuple(data[i:i + 3]))
+    data, stride = raster.samples, raster.stride
+
+    def px(x: int, y: int) -> tuple[int, int, int]:
+        i = y * stride + x * 3
+        return data[i], data[i + 1], data[i + 2]
+
+    border = [px(x, y) for x in range(x0, x1) for y in (y0, y1 - 1)]
+    border += [px(x, y) for y in range(y0, y1) for x in (x0, x1 - 1)]
     bg = tuple(int(statistics.median(c[k] for c in border)) for k in range(3))
     lum_bg = sum(bg) / 3
-    pixels = [tuple(data[y * stride + x * 3: y * stride + x * 3 + 3]) for y in range(2, h - 2) for x in range(2, w - 2)]
-    far = [p for p in pixels if abs(sum(p) / 3 - lum_bg) > 60]
+    step = max(1, (x1 - x0) * (y1 - y0) // 6000)
+    inner = [px(x, y) for y in range(y0 + 2, y1 - 2) for x in range(x0 + 2, x1 - 2, step)]
+    far = [p for p in inner if abs(sum(p) / 3 - lum_bg) > 60]
     if far:
-        far.sort(key=lambda p: sum(p))
-        darkest = far[: max(1, len(far) // 3)]
+        # The core of the strokes; their anti-aliased edges are paler.
+        far.sort(key=sum)
+        darkest = far[: max(1, len(far) // 7)]
         ink = tuple(int(statistics.median(c[k] for c in darkest)) for k in range(3))
     else:
         ink = (0, 0, 0)
@@ -222,6 +251,7 @@ def recognize_page(doc: pymupdf.Document, fonts: DocFonts, page_no: int, languag
             rows.append([piece])
 
     tw = pymupdf.TextWriter(page.rect)
+    raster = PageRaster(page, 200, gray=True) if page.rotation == 0 else None
     words = 0
     for row in rows:
         row.sort(key=lambda p: p[0].x0)
@@ -234,7 +264,7 @@ def recognize_page(doc: pymupdf.Document, fonts: DocFonts, page_no: int, languag
         union = pymupdf.Rect(row[0][0])
         for p in row[1:]:
             union |= p[0]
-        baseline, _ = line_metrics(page, union, full)
+        baseline, _ = line_metrics(page, union, full, raster)
         # Words at their recognised positions, letters spaced by their natural
         # widths (scaled to the word), and a real space after every word so
         # that text extraction keeps words apart without splitting them.
