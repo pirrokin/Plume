@@ -377,22 +377,31 @@ export function DocumentView({ docId, onExit }: Props) {
     if (selectedImage) void imageAction(selectedImage.page, selectedImage.id, { action: "delete" });
   }, [selectedImage, imageAction]);
 
+  const infoRef = useRef(info);
+  infoRef.current = info;
+
   const runOcr = useCallback(
-    async (page: number) => {
-      if (!info || ocrPages.has(page)) return;
-      if (activeRef.current && !(await commitActive())) return;
+    async (page: number, quiet = false): Promise<boolean> => {
+      const current = infoRef.current;
+      if (!current || ocrPages.has(page)) return false;
+      if (activeRef.current && !(await commitActive())) return false;
       setOcrPages((s) => new Set(s).add(page));
       try {
-        const res = await api.ocr(docId, page, info.version);
+        const res = await api.ocr(docId, page, current.version);
+        infoRef.current = res.info;
         registerFamilies(res.page.families);
         setInfo(res.info);
         setModels((prev) => ({ ...prev, [page]: res.page }));
-        toasts.show(
-          res.words ? `${res.words} mots reconnus : cliquez sur un texte pour le modifier.` : "Aucun texte reconnu sur cette page.",
-          res.words ? "success" : "info",
-        );
+        if (!quiet) {
+          toasts.show(
+            res.words ? `${res.words} mots reconnus : cliquez sur un texte pour le modifier.` : "Aucun texte reconnu sur cette page.",
+            res.words ? "success" : "info",
+          );
+        }
+        return true;
       } catch (e) {
         fail(e);
+        return false;
       } finally {
         setOcrPages((s) => {
           const next = new Set(s);
@@ -401,8 +410,19 @@ export function DocumentView({ docId, onExit }: Props) {
         });
       }
     },
-    [info, ocrPages, commitActive, docId, toasts, fail],
+    [ocrPages, commitActive, docId, toasts, fail],
   );
+
+  const runOcrAll = useCallback(async () => {
+    const pages = [...(infoRef.current?.scanned ?? [])];
+    let done = 0;
+    for (const p of pages) {
+      toasts.show(`Reconnaissance du texte : page ${p + 1} (${done + 1}/${pages.length})…`, "info");
+      if (!(await runOcr(p, true))) break;
+      done += 1;
+    }
+    if (done) toasts.show(`${done} page(s) reconnue(s) : le texte est modifiable.`, "success");
+  }, [runOcr, toasts]);
 
   const undo = useCallback(async () => {
     if (activeRef.current) {
@@ -646,12 +666,14 @@ export function DocumentView({ docId, onExit }: Props) {
               model={models[p.index]}
               active={active}
               scanned={info.scanned.includes(p.index)}
+              scannedCount={info.scanned.length}
+              onOcrAll={runOcrAll}
               ocrRunning={ocrPages.has(p.index)}
               selectedImage={selectedImage?.page === p.index ? selectedImage.id : null}
               imageBusy={imageBusy}
               onSelectImage={selectImage}
               onImageChange={onImageChange}
-              onOcr={runOcr}
+              onOcr={(i) => void runOcr(i)}
               onVisible={onVisible}
               onBlockClick={openBlock}
               onAddAt={addAt}

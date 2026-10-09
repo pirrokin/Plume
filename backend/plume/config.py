@@ -15,7 +15,7 @@ CACHE_DIR = DATA_DIR / "cache"
 FRONTEND_DIST = Path(os.environ.get("PLUME_FRONTEND_DIST", ROOT / "frontend" / "dist")).resolve()
 
 # Largest accepted upload, in megabytes.
-MAX_UPLOAD_MB = int(os.environ.get("PLUME_MAX_UPLOAD_MB", "200"))
+MAX_UPLOAD_MB = int(os.environ.get("PLUME_MAX_UPLOAD_MB", "100"))
 
 # Number of versions kept on disk for undo/redo.
 MAX_VERSIONS = int(os.environ.get("PLUME_MAX_VERSIONS", "60"))
@@ -36,6 +36,10 @@ RETENTION_HOURS = SESSION_MAX_HOURS
 
 # Largest number of pages accepted.
 MAX_PAGES = int(os.environ.get("PLUME_MAX_PAGES", "500"))
+
+# Disk space all open sessions may use together; the least recently used
+# sessions are deleted beyond it (protects a public instance).
+MAX_STORAGE_MB = float(os.environ.get("PLUME_MAX_STORAGE_MB", "3000"))
 
 
 def font_dirs() -> list[Path]:

@@ -11,6 +11,8 @@ au reste de la page.
   ligne, justification, retrait de première ligne). Les lignes non modifiées restent intactes.
 - **Mise en forme** : police, taille, gras, italique, souligné, barré, couleur, alignement.
 - **Blocs** : déplacer, élargir, supprimer un bloc de texte ; ajouter du texte n'importe où.
+- **Images** : cliquer sur une image pour la sélectionner, la glisser pour la déplacer, tirer
+  son coin pour la redimensionner, `Suppr` pour l'effacer. L'image n'est jamais recompressée.
 - **Polices** :
   - réutilisation des polices intégrées au PDF, y compris les sous-ensembles réparés
     (PDF créés sur Mac, Word, Canva…) ;
@@ -22,8 +24,13 @@ au reste de la page.
   couleur du papier, puis le nouveau texte est écrit à la couleur de l'encre.
 - **Pages** : pivoter, dupliquer, insérer une page blanche, supprimer, réordonner par
   glisser-déposer, ajouter les pages d'un autre PDF.
-- **Annuler / rétablir** sur tout l'historique, et téléchargement du PDF final.
+- **Annuler / rétablir** sur tout l'historique de la session, et téléchargement du PDF final.
   Les polices y sont allégées et ne gardent que les lettres utilisées.
+- **Confidentialité** : rien n'est conservé. Un document n'existe que le temps de l'onglet qui
+  l'a ouvert. La page envoie un signal toutes les 20 s, et le document est supprimé du serveur
+  à la fermeture de l'onglet (après un délai de grâce de 45 s, qui permet de recharger la
+  page), après 30 min sans signal, ou au bout de 12 h. Le bouton « Fermer » le supprime
+  immédiatement.
 
 ## Lancer Plume sur son ordinateur
 
@@ -43,42 +50,64 @@ En mode développement, avec rechargement automatique du serveur et de l'interfa
 ./plume.sh dev
 ```
 
-Les documents sont stockés dans `data/documents/`. Chaque modification en crée une nouvelle
-version (jusqu'à 60), ce qui permet d'annuler. Les documents inactifs depuis 72 h sont supprimés.
+Pendant une session, le document et ses versions (une par modification, jusqu'à 60, pour
+annuler) sont gardés dans `data/sessions/`, puis supprimés comme décrit plus haut.
 
-## Mettre Plume en ligne sur son domaine
+## Mise en ligne
+
+### Sur o2switch (hébergement actuel : https://plume.kinam.fr)
+
+Plume tourne comme une application Python du cPanel (Passenger), via `passenger_wsgi.py`.
+Pour publier la version locale :
+
+```bash
+./deploy/o2switch.sh
+```
+
+Le script construit l'interface, envoie les fichiers dans `~/plume-app` par SSH (clé
+`~/.ssh/o2switch_claude`), installe les dépendances dans l'environnement Python de
+l'application, la redémarre et vérifie qu'elle répond.
+
+Mise en place d'origine, faite une seule fois :
+
+- sous-domaine `plume.kinam.fr` (dossier `~/plume.kinam.fr`) ;
+- application Python 3.12 (dossier `~/plume-app`, environnement `~/virtualenv/plume-app/3.12`) ;
+- certificat HTTPS Let's Encrypt obtenu avec `acme.sh` (`~/.acme.sh`), installé dans le cPanel,
+  et renouvelé automatiquement par une tâche cron quotidienne ;
+- données temporaires dans `~/plume-data` (sessions, cache, polices téléchargées, modèles OCR).
+
+Particularités d'o2switch prises en compte :
+
+- le pare-feu applicatif (ModSecurity) bloque les envois de fichiers « multipart », donc les
+  PDF sont envoyés en corps brut ;
+- le serveur frontal rejoue les requêtes qui reçoivent une erreur 5xx, donc Plume répond
+  toujours par un code 4xx ;
+- plusieurs processus peuvent tourner en parallèle, donc l'état d'un document est relu
+  depuis le disque et protégé par un verrou.
+
+### Avec Docker (autre serveur)
 
 La configuration fournie utilise Docker et [Caddy](https://caddyserver.com), qui obtient et
 renouvelle tout seul le certificat HTTPS.
 
 1. Sur un serveur (VPS) avec Docker, cloner le projet.
 2. Faire pointer le domaine (enregistrement DNS `A`) vers l'adresse IP du serveur.
-3. Créer le fichier de configuration :
-   ```bash
-   cp .env.example .env
-   # puis renseigner PLUME_DOMAIN et un mot de passe solide dans PLUME_PASSWORD
-   ```
-4. Démarrer :
-   ```bash
-   docker compose up -d --build
-   ```
-
-Plume est alors accessible sur `https://ton-domaine`, protégé par le mot de passe. L'accès est
-limité à 8 essais par quart d'heure, et la session dure 30 jours.
-
-Le serveur n'ayant pas les polices Microsoft, l'image embarque leurs équivalents libres à
-dimensions identiques : Liberation (Arial, Times, Courier), Carlito (Calibri) et Caladea
-(Cambria). Les modèles OCR et les polices Google sont téléchargés au premier besoin, dans le
-volume `/data`.
+3. Créer `.env` à partir de `.env.example` et y renseigner `PLUME_DOMAIN` (et éventuellement
+   `PLUME_PASSWORD` pour demander un mot de passe).
+4. Démarrer avec `docker compose up -d --build`.
 
 ## Réglages (variables d'environnement)
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `PLUME_PASSWORD` | *(vide)* | Mot de passe d'accès ; vide = pas de connexion requise (usage local) |
-| `PLUME_DATA_DIR` | `data/` | Documents, cache, modèles OCR, polices téléchargées |
-| `PLUME_RETENTION_HOURS` | `72` | Suppression des documents inactifs |
-| `PLUME_MAX_UPLOAD_MB` | `200` | Taille maximale d'un PDF envoyé |
+| `PLUME_PASSWORD` | *(vide)* | Mot de passe d'accès ; vide = pas de connexion requise |
+| `PLUME_DATA_DIR` | `data/` | Sessions, cache, modèles OCR, polices téléchargées |
+| `PLUME_SESSION_IDLE_MINUTES` | `30` | Suppression d'un document sans signal de son onglet |
+| `PLUME_SESSION_CLOSE_GRACE_SECONDS` | `45` | Délai après la fermeture de l'onglet |
+| `PLUME_SESSION_MAX_HOURS` | `12` | Durée de vie maximale d'un document |
+| `PLUME_MAX_STORAGE_MB` | `3000` | Espace disque total des sessions (les plus anciennes partent) |
+| `PLUME_MAX_UPLOAD_MB` | `100` | Taille maximale d'un PDF envoyé |
+| `PLUME_MAX_PAGES` | `500` | Nombre maximal de pages |
 | `PLUME_MAX_VERSIONS` | `60` | Versions conservées pour annuler |
 | `PLUME_GOOGLE_FONTS` | `1` | `0` pour ne jamais contacter Google Fonts |
 | `PLUME_OCR_LANGUAGES` | `fra+eng` | Langues de l'OCR (codes Tesseract) |
@@ -109,8 +138,8 @@ Outils de mise au point (dossier `backend/tools`) :
   - `layout.py` recompose le texte (coupure des lignes, justification) ;
   - `editor.py` et `writer.py` effacent et réécrivent le texte ;
   - `docfonts.py`, `pdffonts.py`, `fontindex.py` et `googlefonts.py` gèrent les polices ;
-  - `ocr.py` reconnaît le texte des scans ; `store.py` gère les versions ;
-    `app.py` expose l'API HTTP.
+  - `ocr.py` reconnaît le texte des scans ; `contentstream.py` et `images.py` déplacent les
+    images ; `store.py` gère les sessions et les versions ; `app.py` expose l'API HTTP.
 - `frontend/` : interface React + TypeScript (Vite). `src/editor/richtext.ts` est l'éditeur de
   texte riche, qui reproduit la mise en page de la page pendant la saisie.
 
@@ -126,6 +155,7 @@ Outils de mise au point (dossier `backend/tools`) :
 
 ## Licence
 
-Plume utilise PyMuPDF, distribué sous licence AGPL. Pour un usage personnel, rien à faire. Si
-tu proposes Plume à d'autres personnes via Internet, le code source doit leur être accessible
-(AGPL), ou bien il faut une licence commerciale d'Artifex.
+Plume utilise PyMuPDF, distribué sous licence AGPL. L'instance en ligne étant accessible à tous,
+l'AGPL impose que son code source soit disponible pour ses utilisateurs, par exemple dans un
+dépôt public avec un lien depuis la page d'accueil. L'autre option est une licence commerciale
+d'Artifex.

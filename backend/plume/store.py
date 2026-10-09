@@ -524,6 +524,32 @@ class Store:
                 self._forget(d.name)
                 shutil.rmtree(d, ignore_errors=True)
                 removed += 1
+        removed += self._enforce_quota()
+        return removed
+
+    def _enforce_quota(self) -> int:
+        """Delete the least recently used sessions while over the storage budget."""
+        sessions = []
+        total = 0
+        for d in self.root.iterdir():
+            if not d.is_dir():
+                continue
+            size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+            try:
+                alive = (d / "alive").stat().st_mtime
+            except OSError:
+                alive = 0
+            sessions.append((alive, size, d))
+            total += size
+        budget = config.MAX_STORAGE_MB * 1024 * 1024
+        removed = 0
+        for alive, size, d in sorted(sessions):
+            if total <= budget:
+                break
+            self._forget(d.name)
+            shutil.rmtree(d, ignore_errors=True)
+            total -= size
+            removed += 1
         return removed
 
     def cleanup(self, max_age_hours: float | None = None) -> int:

@@ -15,7 +15,9 @@ interface Props {
   model: PageModel | undefined;
   active: ActiveEdit | null;
   scanned: boolean;
+  scannedCount: number;
   ocrRunning: boolean;
+  onOcrAll(): void;
   selectedImage: string | null;
   imageBusy: boolean;
   onSelectImage(page: number, id: string | null): void;
@@ -191,6 +193,11 @@ function PageViewInner(props: Props) {
               <button className="btn primary small" onClick={() => props.onOcr(page.index)}>
                 Reconnaître le texte (OCR)
               </button>
+              {props.scannedCount > 1 && (
+                <button className="btn small on-dark" onClick={() => props.onOcrAll()}>
+                  Toutes les pages ({props.scannedCount})
+                </button>
+              )}
             </>
           )}
         </div>

@@ -806,6 +806,14 @@ button {
   padding: 0 10px;
   font-size: 13px;
 }
+.btn.on-dark {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: white;
+}
+.btn.on-dark:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.22);
+}
 .spinner.small {
   width: 16px;
   height: 16px;

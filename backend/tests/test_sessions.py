@@ -80,3 +80,13 @@ def test_two_processes_share_a_document(store, sample_pdf):
     twin.undo()
     assert store.get(doc.id).version == 0
     assert "Rapport annuel 2025" in store.get(doc.id).doc[0].get_text()
+
+
+def test_storage_budget_evicts_least_recent(store, sample_pdf, monkeypatch):
+    first = store.create(sample_pdf.read_bytes(), "1.pdf")
+    second = store.create(sample_pdf.read_bytes(), "2.pdf")
+    _age(store.root / first.id / "alive", 120)
+    size = sum(f.stat().st_size for f in (store.root / second.id).iterdir())
+    monkeypatch.setattr(config, "MAX_STORAGE_MB", 1.5 * size / 1024 / 1024)
+    assert store.sweep(force=True) == 1
+    assert not (store.root / first.id).exists() and (store.root / second.id).exists()
