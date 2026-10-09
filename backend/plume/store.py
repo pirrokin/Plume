@@ -1,7 +1,16 @@
-"""Documents on disk: upload, versions (undo/redo), page models and rendering."""
+"""Documents of a browser session: upload, versions (undo/redo), rendering.
+
+Nothing is kept: a document lives in a temporary folder while its tab is open
+(the page sends a heartbeat) and is deleted when the tab closes, after a period
+of inactivity, or after a maximum lifetime. Several server processes may share
+the folder (o2switch/Passenger), so state is re-read from disk and changes are
+serialised with a file lock.
+"""
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -40,6 +49,7 @@ class Document:
         self.versions: list[int] = meta["versions"]
         self.cur: int = meta["cur"]
         self.doc: pymupdf.Document = pymupdf.open(self._path(self.version))
+        self.downloaded: int | None = meta.get("downloaded")
         self.fonts = DocFonts(self.doc)
         self._models: dict[tuple[int, int], dict] = {}
         try:
@@ -58,8 +68,8 @@ class Document:
         return self.root / f"v{version}.pdf"
 
     def _write_meta(self) -> None:
-        meta = {"name": self.name, "versions": self.versions, "cur": self.cur, "touched": time.time()}
-        tmp = self.root / "meta.json.tmp"
+        meta = {"name": self.name, "versions": self.versions, "cur": self.cur, "downloaded": self.downloaded}
+        tmp = self.root / f"meta.json.{secrets.token_hex(4)}"
         tmp.write_text(json.dumps(meta))
         tmp.replace(self.root / "meta.json")
 
@@ -67,6 +77,28 @@ class Document:
         self.doc.close()
         self.doc = pymupdf.open(self._path(self.version))
         self.fonts = DocFonts(self.doc)
+
+    def sync(self) -> None:
+        """Pick up changes made by another server process."""
+        try:
+            meta = json.loads((self.root / "meta.json").read_text())
+        except (OSError, ValueError) as exc:
+            raise DocumentError("Ce document a expiré. Rouvrez le fichier PDF.", 404) from exc
+        self.downloaded = meta.get("downloaded")
+        if meta["versions"] != self.versions or meta["cur"] != self.cur:
+            self.versions, self.cur = meta["versions"], meta["cur"]
+            self._reopen()
+
+    @contextlib.contextmanager
+    def locked(self):
+        """Exclusive access across processes while the document changes."""
+        with open(self.root / ".lock", "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                self.sync()
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
     def page_revs(self) -> list[str]:
         """Fingerprint of each page; it changes only when the page itself changes."""
@@ -105,8 +137,10 @@ class Document:
             "version": self.version,
             "canUndo": self.cur > 0,
             "canRedo": self.cur < len(self.versions) - 1,
+            "unsaved": self.cur > 0 and self.downloaded != self.version,
             "pages": pages,
             "scanned": self.needs_ocr(),
+            "expiresAfterMinutes": config.SESSION_IDLE_MINUTES,
         }
 
     # ---------------------------------------------------------------- reading
@@ -204,6 +238,10 @@ class Document:
     # ---------------------------------------------------------------- editing
     def _commit(self, action) -> EditReport:
         """Run `action` on the open document and save the result as a new version."""
+        with self.locked():
+            return self._commit_locked(action)
+
+    def _commit_locked(self, action) -> EditReport:
         try:
             report = action()
         except EditError as exc:
@@ -295,20 +333,25 @@ class Document:
         return added
 
     def undo(self) -> None:
-        if self.cur == 0:
-            raise DocumentError("Rien à annuler")
-        self.cur -= 1
-        self._write_meta()
-        self._reopen()
+        with self.locked():
+            if self.cur == 0:
+                raise DocumentError("Rien à annuler")
+            self.cur -= 1
+            self._write_meta()
+            self._reopen()
 
     def redo(self) -> None:
-        if self.cur >= len(self.versions) - 1:
-            raise DocumentError("Rien à rétablir")
-        self.cur += 1
-        self._write_meta()
-        self._reopen()
+        with self.locked():
+            if self.cur >= len(self.versions) - 1:
+                raise DocumentError("Rien à rétablir")
+            self.cur += 1
+            self._write_meta()
+            self._reopen()
 
     def export(self) -> bytes:
+        with self.locked():
+            self.downloaded = self.version
+            self._write_meta()
         out = pymupdf.open(self._path(self.version))
         try:
             out.subset_fonts()
@@ -324,6 +367,7 @@ class Store:
         self.root.mkdir(parents=True, exist_ok=True)
         self._open: OrderedDict[str, Document] = OrderedDict()
         self.max_open = max_open
+        self._last_sweep = 0.0
 
     def create(self, data: bytes, name: str) -> Document:
         try:
@@ -334,7 +378,10 @@ class Store:
             raise DocumentError("Ce PDF est protégé par un mot de passe.")
         if doc.page_count == 0:
             raise DocumentError("Ce PDF ne contient aucune page.")
-        doc_id = secrets.token_urlsafe(12)
+        if doc.page_count > config.MAX_PAGES:
+            raise DocumentError(f"Ce PDF a trop de pages (maximum {config.MAX_PAGES}).")
+        self.sweep()
+        doc_id = secrets.token_urlsafe(16)
         root = self.root / doc_id
         root.mkdir(parents=True)
         if doc.is_repaired or doc.is_encrypted:
@@ -342,37 +389,108 @@ class Store:
         else:
             (root / "v0.pdf").write_bytes(data)
         doc.close()
-        meta = {"name": name or "document.pdf", "versions": [0], "cur": 0, "touched": time.time()}
+        meta = {"name": name or "document.pdf", "versions": [0], "cur": 0, "created": time.time()}
         (root / "meta.json").write_text(json.dumps(meta))
+        (root / "created").touch()
+        (root / "alive").touch()
         return self.get(doc_id)
 
-    def get(self, doc_id: str) -> Document:
-        if not doc_id or not all(c.isalnum() or c in "-_" for c in doc_id):
+    def _root_of(self, doc_id: str) -> Path:
+        if not doc_id or len(doc_id) > 64 or not all(c.isalnum() or c in "-_" for c in doc_id):
             raise DocumentError("Document introuvable", 404)
+        return self.root / doc_id
+
+    def get(self, doc_id: str) -> Document:
+        root = self._root_of(doc_id)
+        if not (root / "meta.json").exists():
+            self._forget(doc_id)
+            raise DocumentError("Ce document a expiré. Rouvrez le fichier PDF.", 404)
         doc = self._open.get(doc_id)
         if doc is not None:
             self._open.move_to_end(doc_id)
-            return doc
-        root = self.root / doc_id
-        if not (root / "meta.json").exists():
-            raise DocumentError("Document introuvable", 404)
-        doc = Document(doc_id, root)
-        self._open[doc_id] = doc
-        while len(self._open) > self.max_open:
-            _, old = self._open.popitem(last=False)
-            old.doc.close()
+            doc.sync()
+        else:
+            doc = Document(doc_id, root)
+            self._open[doc_id] = doc
+            while len(self._open) > self.max_open:
+                _, old = self._open.popitem(last=False)
+                old.doc.close()
+        self.touch(doc_id)
         return doc
 
-    def cleanup(self, max_age_hours: float) -> int:
-        removed = 0
-        limit = time.time() - max_age_hours * 3600
-        for d in self.root.iterdir():
-            meta = d / "meta.json"
+    # ---------------------------------------------------------------- lifetime
+    def touch(self, doc_id: str) -> None:
+        """The tab is still open: postpone expiry (and cancel a pending close)."""
+        root = self._root_of(doc_id)
+        try:
+            (root / "alive").touch()
+            (root / "closing").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def ping(self, doc_id: str) -> bool:
+        root = self._root_of(doc_id)
+        if not (root / "meta.json").exists():
+            return False
+        self.touch(doc_id)
+        return True
+
+    def close_soon(self, doc_id: str) -> None:
+        """The tab is going away; delete after a short grace period unless it comes back (reload)."""
+        root = self._root_of(doc_id)
+        if root.exists():
             try:
-                touched = json.loads(meta.read_text()).get("touched", 0)
+                (root / "closing").touch()
+            except OSError:
+                pass
+
+    def delete(self, doc_id: str) -> None:
+        root = self._root_of(doc_id)
+        self._forget(doc_id)
+        shutil.rmtree(root, ignore_errors=True)
+
+    def _forget(self, doc_id: str) -> None:
+        doc = self._open.pop(doc_id, None)
+        if doc is not None:
+            try:
+                doc.doc.close()
             except Exception:
-                touched = 0
-            if touched < limit and d.name not in self._open:
+                pass
+
+    def sweep(self, force: bool = False) -> int:
+        """Delete expired sessions; cheap enough to call on every upload."""
+        now = time.time()
+        if not force and now - self._last_sweep < 30:
+            return 0
+        self._last_sweep = now
+        removed = 0
+        idle = config.SESSION_IDLE_MINUTES * 60
+        grace = config.SESSION_CLOSE_GRACE_SECONDS
+        lifetime = config.SESSION_MAX_HOURS * 3600
+        for d in self.root.iterdir():
+            if not d.is_dir():
+                continue
+            try:
+                alive = (d / "alive").stat().st_mtime
+            except OSError:
+                alive = 0
+            try:
+                created = (d / "created").stat().st_mtime
+            except OSError:
+                created = alive
+            closing = None
+            try:
+                closing = (d / "closing").stat().st_mtime
+            except OSError:
+                pass
+            expired = now - alive > idle or now - created > lifetime
+            if closing is not None and closing >= alive and now - closing > grace:
+                expired = True
+            if expired:
+                self._forget(d.name)
                 shutil.rmtree(d, ignore_errors=True)
                 removed += 1
         return removed
+
+    def cleanup(self, max_age_hours: float | None = None) -> int:
+        return self.sweep(force=True)

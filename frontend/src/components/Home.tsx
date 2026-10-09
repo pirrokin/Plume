@@ -1,20 +1,10 @@
 import { useCallback, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import { recentDocuments } from "./DocumentView";
-import { IconFeather, IconFile, IconUpload } from "./icons";
+import { IconFeather, IconUpload } from "./icons";
 import { useToasts } from "./Toasts";
 
 interface Props {
   onOpen(id: string): void;
-}
-
-function ago(ts: number): string {
-  const min = Math.round((Date.now() - ts) / 60000);
-  if (min < 1) return "à l'instant";
-  if (min < 60) return `il y a ${min} min`;
-  const h = Math.round(min / 60);
-  if (h < 24) return `il y a ${h} h`;
-  return `il y a ${Math.round(h / 24)} j`;
 }
 
 export function Home({ onOpen }: Props) {
@@ -22,7 +12,6 @@ export function Home({ onOpen }: Props) {
   const [uploading, setUploading] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const toasts = useToasts();
-  const recent = recentDocuments();
 
   const upload = useCallback(
     async (file: File | undefined) => {
@@ -92,25 +81,14 @@ export function Home({ onOpen }: Props) {
           />
         </div>
 
-        {recent.length > 0 && (
-          <div className="recent">
-            <h2>Documents récents</h2>
-            <ul>
-              {recent.map((d) => (
-                <li key={d.id}>
-                  <button onClick={() => onOpen(d.id)}>
-                    <IconFile size={18} />
-                    <span className="recent-name">{d.name}</span>
-                    <span className="recent-meta">
-                      {d.pages} p. · {ago(d.at)}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-        <p className="footnote">Les documents sont traités sur ce serveur et supprimés après 3 jours d'inactivité.</p>
+        <ul className="promises">
+          <li>Le texte garde sa police, sa taille et sa mise en page.</li>
+          <li>Images déplaçables, pages réorganisables, OCR des documents scannés.</li>
+          <li>
+            Rien n'est conservé : votre document est supprimé du serveur dès que vous fermez l'onglet (ou après 30 min
+            d'inactivité).
+          </li>
+        </ul>
       </div>
     </div>
   );

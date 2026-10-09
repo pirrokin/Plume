@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 DATA_DIR = Path(os.environ.get("PLUME_DATA_DIR", ROOT / "data")).resolve()
-DOCS_DIR = DATA_DIR / "documents"
+DOCS_DIR = DATA_DIR / "sessions"
 CACHE_DIR = DATA_DIR / "cache"
 
 FRONTEND_DIST = Path(os.environ.get("PLUME_FRONTEND_DIST", ROOT / "frontend" / "dist")).resolve()
@@ -24,8 +24,18 @@ MAX_VERSIONS = int(os.environ.get("PLUME_MAX_VERSIONS", "60"))
 # does not forward X-Forwarded-Proto).
 COOKIE_SECURE = os.environ.get("PLUME_COOKIE_SECURE", "0") in ("1", "true", "yes")
 
-# Documents untouched for this many hours are deleted at startup.
-RETENTION_HOURS = float(os.environ.get("PLUME_RETENTION_HOURS", "72"))
+# Documents only live for the browser session that opened them.
+# Deleted after this long without a heartbeat from the tab:
+SESSION_IDLE_MINUTES = float(os.environ.get("PLUME_SESSION_IDLE_MINUTES", "30"))
+# Deleted this long after the tab was closed (a reload cancels it):
+SESSION_CLOSE_GRACE_SECONDS = float(os.environ.get("PLUME_SESSION_CLOSE_GRACE_SECONDS", "45"))
+# Deleted after this long whatever happens:
+SESSION_MAX_HOURS = float(os.environ.get("PLUME_SESSION_MAX_HOURS", "12"))
+# Kept for compatibility with earlier configurations.
+RETENTION_HOURS = SESSION_MAX_HOURS
+
+# Largest number of pages accepted.
+MAX_PAGES = int(os.environ.get("PLUME_MAX_PAGES", "500"))
 
 
 def font_dirs() -> list[Path]:

@@ -3,7 +3,7 @@ import { api, ApiError, Block, DocInfo, EditResult, FamilyInfo, PageModel, Run }
 import { registerFamilies } from "../fonts";
 import type { ActiveEdit, EditorController, FormatState } from "./BlockEditor";
 import { FormatBar } from "./FormatBar";
-import { IconDownload, IconFeather, IconMinus, IconPlus, IconRedo, IconText, IconTextAdd, IconUndo } from "./icons";
+import { IconDownload, IconFeather, IconMinus, IconPlus, IconRedo, IconText, IconTextAdd, IconUndo, IconX } from "./icons";
 import { PageView, Tool } from "./PageView";
 import { PageOp, Sidebar } from "./Sidebar";
 import { useToasts } from "./Toasts";
@@ -63,6 +63,7 @@ export function DocumentView({ docId, onExit }: Props) {
   const activeRef = useRef(active);
   activeRef.current = active;
   const keyRef = useRef(1);
+  const commitActiveRef = useRef<() => Promise<boolean>>(async () => true);
   const loading = useRef(new Set<string>());
   const scroller = useRef<HTMLDivElement>(null);
   const toasts = useToasts();
@@ -79,7 +80,6 @@ export function DocumentView({ docId, onExit }: Props) {
       .then((i) => {
         setInfo(i);
         document.title = `${i.name} — Plume`;
-        rememberDocument(i);
       })
       .catch((e) => {
         fail(e);
@@ -89,6 +89,59 @@ export function DocumentView({ docId, onExit }: Props) {
       document.title = "Plume — éditeur PDF";
     };
   }, [docId, fail, onExit]);
+
+  // The document only lives while this tab is open: heartbeat, and tell the
+  // server when the tab goes away (a reload sends a heartbeat right after).
+  useEffect(() => {
+    let stopped = false;
+    const beat = () => {
+      api
+        .ping(docId)
+        .then((r) => {
+          if (!r.alive && !stopped) {
+            toasts.show("Ce document a expiré : rouvrez le fichier PDF.", "error");
+            onExit();
+          }
+        })
+        .catch(() => undefined);
+    };
+    const timer = window.setInterval(beat, 20000);
+    const onVisible = () => document.visibilityState === "visible" && beat();
+    const onHide = () => api.leaving(docId);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pagehide", onHide);
+    beat();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, [docId, onExit, toasts]);
+
+  // Warn before leaving with changes that were not downloaded.
+  const unsavedRef = useRef(false);
+  unsavedRef.current = !!info?.unsaved || !!active;
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!unsavedRef.current) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
+  const closeDocument = useCallback(async () => {
+    if (activeRef.current && !(await commitActiveRef.current())) return;
+    if (
+      unsavedRef.current &&
+      !window.confirm("Fermer le document ? Les modifications non téléchargées seront perdues.")
+    )
+      return;
+    await api.closeDocument(docId);
+    onExit();
+  }, [docId, onExit]);
 
   useEffect(() => {
     localStorage.setItem("plume.zoom", String(zoom));
@@ -140,7 +193,7 @@ export function DocumentView({ docId, onExit }: Props) {
   }, []);
 
   /** Validate the block being edited; false if it could not be saved. */
-  const commitActive = useCallback(async (): Promise<boolean> => {
+  const commitActive: () => Promise<boolean> = useCallback(async (): Promise<boolean> => {
     const a = activeRef.current;
     if (!a || a.closing) return true;
     if (!controller.current) return true;
@@ -151,6 +204,8 @@ export function DocumentView({ docId, onExit }: Props) {
       setBusy(false);
     }
   }, []);
+
+  commitActiveRef.current = commitActive;
 
   const openBlock = useCallback(
     async (page: number, block: Block, click: { x: number; y: number }) => {
@@ -322,6 +377,9 @@ export function DocumentView({ docId, onExit }: Props) {
     document.body.appendChild(a);
     a.click();
     a.remove();
+    window.setTimeout(() => {
+      api.info(docId).then(setInfo).catch(() => undefined);
+    }, 1500);
   }, [commitActive, docId, info]);
 
   const zoomBy = useCallback((dir: 1 | -1) => {
@@ -416,13 +474,16 @@ export function DocumentView({ docId, onExit }: Props) {
   return (
     <div className="app">
       <header className="topbar">
-        <button className="brand" onClick={onExit} title="Ouvrir un autre document">
+        <button className="brand" onClick={() => void closeDocument()} title="Fermer et ouvrir un autre document">
           <IconFeather size={20} />
           <span>Plume</span>
         </button>
         <div className="doc-name" title={info.name}>
           {info.name}
         </div>
+        <button className="icon-btn close-doc" onClick={() => void closeDocument()} title="Fermer le document (supprimé du serveur)">
+          <IconX size={16} />
+        </button>
         <div className="toolbar">
           <div className="btn-group">
             <button className="icon-btn" onClick={() => void undo()} disabled={!info.canUndo && !active} title="Annuler (⌘Z)">
@@ -513,30 +574,4 @@ export function DocumentView({ docId, onExit }: Props) {
       </div>
     </div>
   );
-}
-
-export interface RecentDoc {
-  id: string;
-  name: string;
-  pages: number;
-  at: number;
-}
-
-export function recentDocuments(): RecentDoc[] {
-  try {
-    const list = JSON.parse(localStorage.getItem("plume.recent") ?? "[]") as RecentDoc[];
-    return Array.isArray(list) ? list : [];
-  } catch {
-    return [];
-  }
-}
-
-function rememberDocument(info: DocInfo): void {
-  try {
-    const list = recentDocuments().filter((d) => d.id !== info.id);
-    list.unshift({ id: info.id, name: info.name, pages: info.pages.length, at: Date.now() });
-    localStorage.setItem("plume.recent", JSON.stringify(list.slice(0, 12)));
-  } catch {
-    /* storage unavailable */
-  }
 }

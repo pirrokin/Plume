@@ -4,3 +4,4 @@ uvicorn[standard]
 python-multipart
 fonttools==4.66.1
 certifi
+a2wsgi

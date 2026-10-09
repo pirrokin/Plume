@@ -18,6 +18,8 @@ export interface DocInfo {
   canRedo: boolean;
   pages: PageInfo[];
   scanned: number[];
+  unsaved: boolean;
+  expiresAfterMinutes: number;
 }
 
 export interface Style {
@@ -159,6 +161,13 @@ export const api = {
   login: (password: string) => request<{ authenticated: boolean }>("/api/login", json("POST", { password })),
   logout: () => request<{ authenticated: boolean }>("/api/logout", { method: "POST" }),
   info: (id: string) => request<DocInfo>(base(id)),
+  ping: (id: string) => request<{ alive: boolean }>(`${base(id)}/ping`, { method: "POST" }),
+  closeDocument: (id: string) => fetch(base(id), { method: "DELETE" }).catch(() => undefined),
+  /** Tells the server the tab is going away (survives page unload). */
+  leaving(id: string): void {
+    const url = `${base(id)}/close`;
+    if (!navigator.sendBeacon?.(url)) fetch(url, { method: "POST", keepalive: true }).catch(() => undefined);
+  },
   page: (id: string, page: number) => request<PageModel>(`${base(id)}/pages/${page}/text`),
   edit: (id: string, page: number, blockId: string, body: { version: number; sig: string; runs: Run[]; box: Box }) =>
     request<EditResult>(`${base(id)}/pages/${page}/blocks/${encodeURIComponent(blockId)}`, json("POST", body)),

@@ -26,13 +26,28 @@ config.ensure_dirs()
 store = Store()
 
 
+_started = threading.Event()
+_start_lock = threading.Lock()
+
+
+def _ensure_started() -> None:
+    """Startup work, run once per process (lifespan events do not exist under WSGI)."""
+    if _started.is_set():
+        return
+    with _start_lock:
+        if _started.is_set():
+            return
+        _started.set()
+        removed = store.sweep(force=True)
+        if removed:
+            log.info("removed %d expired documents", removed)
+        # Build the font index in the background so that the first edit is fast.
+        threading.Thread(target=_warm_up, daemon=True).start()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    removed = store.cleanup(config.RETENTION_HOURS)
-    if removed:
-        log.info("removed %d old documents", removed)
-    # Build the font index in the background so that the first edit is fast.
-    threading.Thread(target=_warm_up, daemon=True).start()
+    _ensure_started()
     yield
 
 
@@ -69,13 +84,24 @@ def _document_error(_request: Request, exc: DocumentError) -> JSONResponse:
     return JSONResponse({"detail": str(exc)}, status_code=exc.status)
 
 
+@app.exception_handler(Exception)
+def _unexpected_error(_request: Request, exc: Exception) -> JSONResponse:
+    # Never answer 5xx: o2switch's front server replays such requests, which
+    # could apply an edit twice. The browser just shows the message.
+    log.exception("unexpected error")
+    return JSONResponse({"detail": f"Erreur inattendue ({type(exc).__name__}). Réessayez."}, status_code=422)
+
+
 @app.middleware("http")
 async def _require_session(request: Request, call_next):
+    _ensure_started()
+    store.sweep()
     path = request.url.path
     if auth.enabled() and path.startswith("/api/") and path not in auth.PUBLIC_API:
         if not auth.valid(request.cookies.get(auth.COOKIE)):
             return JSONResponse({"detail": "Connexion requise"}, status_code=401)
     response = await call_next(request)
+    response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
@@ -170,6 +196,10 @@ class _PngCache:
         if data is not None:
             self.items.move_to_end(key)
         return data
+
+    def forget(self, doc_id: str) -> None:
+        for key in [k for k in self.items if k[0] == doc_id]:
+            self.size -= len(self.items.pop(key))
 
     def put(self, key: tuple, data: bytes) -> None:
         self.items[key] = data
@@ -302,6 +332,27 @@ async def merge(doc_id: str, file: UploadFile = File(...), at: int | None = None
         return doc.info()
 
 
+@app.post("/api/documents/{doc_id}/ping")
+def ping(doc_id: str) -> dict:
+    """Heartbeat of an open tab: keeps the document alive."""
+    return {"alive": store.ping(doc_id)}
+
+
+@app.post("/api/documents/{doc_id}/close")
+def close(doc_id: str) -> Response:
+    """Sent by the browser when the tab goes away (reloads cancel it)."""
+    store.close_soon(doc_id)
+    return Response(status_code=204)
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str) -> Response:
+    with MUPDF_LOCK:
+        store.delete(doc_id)
+        png_cache.forget(doc_id)
+    return Response(status_code=204)
+
+
 @app.post("/api/documents/{doc_id}/undo")
 def undo(doc_id: str) -> dict:
     with MUPDF_LOCK:
@@ -364,6 +415,11 @@ def system_font(face_id: str) -> Response:
     data = index.face_bytes(face_id)
     mime = "font/otf" if face.cff else "font/ttf"
     return Response(data, media_type=mime, headers={"Cache-Control": "public, max-age=604800"})
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots() -> Response:
+    return Response("User-agent: *\nDisallow: /\n", media_type="text/plain")
 
 
 @app.get("/api/health")
