@@ -50,6 +50,9 @@ class ChainItem:
     synth_bold: bool
     synth_italic: bool
     source: str
+    # Family this glyph source stands in for, when it is a substitute (look-alike,
+    # generic or universal fallback) rather than a face of the family itself.
+    stands_for: str | None = None
 
     def covers(self, u: int) -> bool:
         if self.codepoints is not None:
@@ -155,6 +158,8 @@ class DocFonts:
         self._emb_by_key: dict[str, list[tuple[int, int, bool]]] | None = None
         self._reliable: dict[str, bool] = {}
         self._type3_names: set[str] = set()
+        # Fonts written by Plume as substitutes, mapped to the family they stand for.
+        self._stand_ins: dict[str, str] = {}
         self._prepared: dict[int, PreparedFont] = {}
         self._span_cache: dict[tuple[str, int], FamRef] = {}
         self._fitz_sys: dict[str, pymupdf.Font] = {}
@@ -168,6 +173,7 @@ class DocFonts:
             self._emb_by_key = None
             self._reliable = {}
             self._type3_names = set()
+            self._stand_ins = {}
             self._span_cache.clear()
             self._chains.clear()
             for fam in self.families.values():
@@ -183,6 +189,12 @@ class DocFonts:
                         continue
                     seen.add(xref)
                     name = strip_subset(basefont) if basefont else f"Type3 ({xref} 0 R)"
+                    typ, tag = self.doc.xref_get_key(xref, "PlumeFamily")
+                    if typ == "string" and tag:
+                        # Text extraction names spans after the font's PostScript name.
+                        for alias in (name, _postscript_name(self.doc, xref)):
+                            if alias:
+                                self._stand_ins[alias] = tag
                     ok = is_text_reliable(self.doc, xref)
                     self._reliable[name] = self._reliable.get(name, True) and ok
                     if ftype == "Type3":
@@ -272,6 +284,14 @@ class DocFonts:
         ref = self._span_cache.get(cache_key)
         if ref is None:
             info = parse_font_name(fontname, flags)
+            with self._lock:
+                self._scan()
+                stand_in = self._stand_ins.get(strip_subset(fontname))
+            if stand_in:
+                fam = self.family(stand_in)
+                ref = FamRef(fam.key, info["weight"], info["italic"])
+                self._span_cache[cache_key] = ref
+                return ref
             key = info["key"]
             if not strip_subset(fontname) or key in ("unknown",) or key.startswith("unnamed") or self.is_type3(fontname):
                 key = f"inconnue{info['generic']}"
@@ -296,7 +316,7 @@ class DocFonts:
             self._fitz_sys[face.id] = font
         return font
 
-    def _items_for(self, fam: Family, weight: int, italic: bool) -> list[ChainItem]:
+    def _items_for(self, fam: Family, weight: int, italic: bool, stands_for: str | None = None) -> list[ChainItem]:
         m = fam.match(weight, italic)
         if not m:
             return []
@@ -305,9 +325,11 @@ class DocFonts:
         for xref in slot.emb:
             pf = self.prepared(xref)
             if pf.usable and pf.font is not None:
-                items.append(ChainItem(pf.font, pf.codepoints, sb, si, f"emb:{xref}"))
+                items.append(ChainItem(pf.font, pf.codepoints, sb, si, f"emb:{xref}", stands_for))
         if slot.sys is not None:
-            items.append(ChainItem(self.sys_font(slot.sys), None, sb, si, f"sys:{slot.sys.id}"))
+            # A look-alike installed font stands for the family it replaces.
+            sys_for = stands_for or (None if fam.exact_sys else fam.key)
+            items.append(ChainItem(self.sys_font(slot.sys), None, sb, si, f"sys:{slot.sys.id}", sys_for))
         return items
 
     def chain(self, key: str, weight: int, italic: bool) -> list[ChainItem]:
@@ -328,11 +350,11 @@ class DocFonts:
             items = self._items_for(fam, weight, italic)
             gfam = self.generic_family(fam.generic)
             if gfam is not None and gfam.key != fam.key:
-                items += self._items_for(gfam, weight, italic)
+                items += self._items_for(gfam, weight, italic, stands_for=key)
             b14 = _B14[(fam.generic, weight >= 600, bool(italic))]
-            items.append(ChainItem(pymupdf.Font(b14), None, False, False, f"b14:{b14}"))
+            items.append(ChainItem(pymupdf.Font(b14), None, False, False, f"b14:{b14}", key))
             for ukey in self.index.universal_keys():
-                items += self._items_for(self.family(ukey), 400, False)
+                items += self._items_for(self.family(ukey), 400, False, stands_for=key)
             self._chains[ck] = items
             return items
 
@@ -365,6 +387,21 @@ class DocFonts:
             for ukey in self.index.universal_keys():
                 add_family("PF universal", self.family(ukey))
         return "\n".join(rules)
+
+
+def _postscript_name(doc: pymupdf.Document, xref: int) -> str | None:
+    try:
+        import io
+
+        from fontTools.ttLib import TTFont
+
+        buf = doc.extract_font(xref)[3]
+        if not buf:
+            return None
+        name = TTFont(io.BytesIO(buf), lazy=True)["name"].getDebugName(6)
+        return strip_subset(name) if name else None
+    except Exception:
+        return None
 
 
 def _unicode_range(cps: set[int]) -> str:

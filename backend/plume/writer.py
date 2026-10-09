@@ -89,9 +89,36 @@ def write_pieces(page: pymupdf.Page, pieces: list[Piece], decos: list[Deco]) -> 
         tw.write_text(page, color=_rgb(color), opacity=alpha, render_mode=mode, matrix=shear * corr)
     for d in decos:
         _draw_deco(page, d)
-    for xref, *_ in page.get_fonts(full=True):
-        if xref not in fonts_before:
-            fix_tounicode(page.parent, xref)
+    new_fonts = [xref for xref, *_ in page.get_fonts(full=True) if xref not in fonts_before]
+    for xref in new_fonts:
+        fix_tounicode(page.parent, xref)
+    if new_fonts:
+        _tag_stand_ins(page.parent, new_fonts, pieces)
+
+
+def _tag_stand_ins(doc: pymupdf.Document, xrefs: list[int], pieces: list[Piece]) -> None:
+    """Mark fonts used as substitutes with the family they replace.
+
+    The key is ignored by PDF viewers; Plume reads it back so that letters
+    borrowed from another font stay part of the original family.
+    """
+    wanted: dict[int, set[str]] = defaultdict(set)
+    for piece in pieces:
+        try:
+            digest = hash(piece.item.font.buffer)
+        except Exception:
+            continue
+        wanted[digest].add(piece.item.stands_for or "")
+    for xref in xrefs:
+        try:
+            buf = doc.extract_font(xref)[3]
+        except Exception:
+            continue
+        families = wanted.get(hash(buf)) if buf else None
+        if families and len(families) == 1:
+            family = next(iter(families))
+            if family:
+                doc.xref_set_key(xref, "PlumeFamily", pymupdf.get_pdf_str(family))
 
 
 # Code points that share their glyph with a more common character. MuPDF builds

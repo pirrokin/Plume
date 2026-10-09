@@ -14,6 +14,12 @@ _WEIGHT_TOKENS: list[tuple[str, int]] = [
     ("thin", 100), ("book", 400), ("roman", 400), ("bold", 700), ("demi", 600),
 ]
 _ITALIC_TOKENS = ("italic", "oblique", "inclined", "kursiv", "slanted")
+# Style words recognised at the end of space-separated names ("Roman" and
+# "Book" are left alone: they belong to family names like "Times New Roman").
+_SPACED_STYLE_WORDS = {
+    "regular", "bold", "italic", "oblique", "light", "medium", "semibold", "demibold", "extrabold",
+    "ultrabold", "black", "heavy", "thin", "extralight", "ultralight", "hairline", "bolditalic",
+}
 
 # Words that end a PostScript family name without being part of the family.
 _FAMILY_SUFFIXES = ("psmt", "mt", "ps")
@@ -74,6 +80,14 @@ def split_font_name(name: str) -> tuple[str, str]:
     if "," in n:
         base, _, style = n.partition(",")
         return base, style
+    if " " in n and "-" not in n:
+        # "Times New Roman Bold Italic": how MuPDF names the fonts it embeds.
+        words = n.split()
+        style_words: list[str] = []
+        while len(words) > 1 and words[-1].lower() in _SPACED_STYLE_WORDS:
+            style_words.insert(0, words.pop())
+        if style_words:
+            return " ".join(words), " ".join(style_words)
     if "-" in n:
         base, _, style = n.rpartition("-")
         if _style_info(style)[2]:

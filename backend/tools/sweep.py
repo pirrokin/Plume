@@ -56,7 +56,7 @@ def sweep_file(path: Path, rng: random.Random, max_pages=3, edits_per_page=3):
             words_before = page.get_text("words")
             t = time.time()
             try:
-                report = edit_block(doc, fonts, pno, model["internal"][block["id"]], runs, box)
+                report = edit_block(doc, fonts, pno, model["internal"][block["id"]], runs, box, block.get("bg") if block.get("scan") else None)
             except Exception:
                 problems.append(f"p{pno} {block['id']} edit: {traceback.format_exc(limit=4)}")
                 stats["edit_errors"] += 1

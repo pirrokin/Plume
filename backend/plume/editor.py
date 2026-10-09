@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass
 
 import pymupdf
@@ -27,10 +26,6 @@ class EditReport:
     removed_chars: int
     restored_chars: int
     bbox: tuple[float, float, float, float] | None
-
-
-def _char_key(c: Char) -> tuple:
-    return (c.c, round(c.x0, 1), round(c.oy, 1))
 
 
 def _page_chars(page: pymupdf.Page, fonts: DocFonts) -> list[Char]:
@@ -73,49 +68,107 @@ def _pieces_for_lines(result: LayoutResult, indices: set[int]):
     return pieces, decos
 
 
+def _match(wanted: list[Char], found: list[Char]) -> tuple[list[Char], list[Char]]:
+    """Pair characters by value and position, tolerating tiny shifts.
+
+    Rewriting a content stream can move glyphs by a hundredth of a point, so
+    exact coordinates cannot be compared. Returns (unmatched wanted, matched found).
+    """
+    pool: dict[tuple[str, int], list[Char]] = {}
+    for c in found:
+        pool.setdefault((c.c, round(c.oy)), []).append(c)
+    missing: list[Char] = []
+    matched: list[Char] = []
+    for c in wanted:
+        best = None
+        for dy in (0, -1, 1):
+            for cand in pool.get((c.c, round(c.oy) + dy), []):
+                if abs(cand.oy - c.oy) < 0.5 and abs(cand.x0 - c.x0) < 0.6:
+                    if best is None or abs(cand.x0 - c.x0) < abs(best.x0 - c.x0):
+                        best = cand
+        if best is None:
+            missing.append(c)
+        else:
+            pool[(best.c, round(best.oy))].remove(best)
+            matched.append(best)
+    return missing, matched
+
+
 def _remove_verified(page: pymupdf.Page, fonts: DocFonts, targets: list[Char]) -> int:
     """Remove `targets`, check nothing else vanished and put back collateral losses."""
+    targets = [c for c in targets if not c.c.isspace()]
     if not targets:
         return 0
     before = _page_chars(page, fonts)
-    target_keys = Counter(_char_key(c) for c in targets if not c.c.isspace())
-    expected = Counter(_char_key(c) for c in before)
-    expected.subtract(target_keys)
+    _, target_instances = _match(targets, before)
+    taken = {id(c) for c in target_instances}
+    others = [c for c in before if id(c) not in taken]
     remove_chars(page, targets)
     fonts.invalidate()
     after = _page_chars(page, fonts)
-    actual = Counter(_char_key(c) for c in after)
 
-    # Characters that should be gone but are still there: retry with taller strips.
-    leftovers = [c for c in after if target_keys.get(_char_key(c), 0) > 0 and actual[_char_key(c)] > expected[_char_key(c)]]
-    if leftovers:
-        rects = []
+    # Characters that should be gone but are still there (thin glyphs such as
+    # "-" or ".", unusual text matrices): retry with vertical hairlines through
+    # their centre, first over the line box, then over the glyph box MuPDF
+    # reports in its text trace.
+    def leftovers_of(chars: list[Char]) -> list[Char]:
+        _, kept_others = _match(others, chars)
+        used = {id(c) for c in kept_others}
+        rest = [c for c in chars if id(c) not in used]
+        _, still = _match(target_instances, rest)
+        return still
+
+    for attempt in range(2):
+        leftovers = leftovers_of(after)
+        if not leftovers:
+            break
+        boxes = _trace_boxes(page) if attempt else {}
         for c in leftovers:
-            h = c.bottom - c.top
-            rects.append(pymupdf.Rect((c.x0 + c.x1) / 2 - 0.1, c.top + 0.35 * h, (c.x0 + c.x1) / 2 + 0.1, c.bottom - 0.35 * h))
-        for r in rects:
-            page.add_redact_annot(r, fill=False, cross_out=False)
+            cx = (c.x0 + c.x1) / 2
+            y0, y1 = c.top, c.bottom
+            box = boxes.get((round(c.x0, 1), round(c.oy, 1)))
+            if box is not None:
+                y0, y1 = min(y0, box.y0), max(y1, box.y1)
+            h = y1 - y0
+            page.add_redact_annot(pymupdf.Rect(cx - 0.1, y0 + 0.1 * h, cx + 0.1, y1 - 0.1 * h), fill=False, cross_out=False)
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                               text=pymupdf.PDF_REDACT_TEXT_REMOVE)
         after = _page_chars(page, fonts)
-        actual = Counter(_char_key(c) for c in after)
-        still = [c for c in after if target_keys.get(_char_key(c), 0) > 0 and actual[_char_key(c)] > expected[_char_key(c)]]
-        if still:
-            raise EditError("Impossible d'effacer proprement le texte d'origine de ce bloc.")
+    if leftovers_of(after):
+        raise EditError("Impossible d'effacer proprement le texte d'origine de ce bloc.")
 
-    # Characters of other blocks removed by accident: rewrite them in place.
-    missing = expected - actual
-    lost = []
-    pool = Counter(missing)
-    for c in before:
-        k = _char_key(c)
-        if pool.get(k, 0) > 0 and target_keys.get(k, 0) == 0:
-            lost.append(c)
-            pool[k] -= 1
+    # Characters of other blocks that were removed, or moved: MuPDF does not
+    # compensate character spacing (Tc) when it drops glyphs, so the rest of a
+    # letter-spaced line can shift. Moved copies are deleted (repeatedly, as
+    # deleting them can shift what follows) and everything is rewritten at its
+    # original position.
+    lost, kept = _match(others, after)
+    for _ in range(3):
+        if not lost:
+            break
+        kept_ids = {id(c) for c in kept}
+        orphans = [c for c in after if id(c) not in kept_ids]
+        if not orphans:
+            break
+        remove_chars(page, orphans)
+        after = _page_chars(page, fonts)
+        lost, kept = _match(others, after)
     if lost:
-        log.warning("restoring %d characters removed as collateral", len(lost))
+        log.info("rewriting %d neighbouring characters at their original position", len(lost))
         _restore(page, fonts, lost)
     return len(lost)
+
+
+def _trace_boxes(page: pymupdf.Page) -> dict[tuple[float, float], pymupdf.Rect]:
+    """Glyph boxes from MuPDF's text trace, by character origin."""
+    boxes = {}
+    try:
+        for span in page.get_texttrace():
+            for _u, _g, origin, bbox in span["chars"]:
+                boxes[(round(origin[0], 1), round(origin[1], 1))] = pymupdf.Rect(bbox)
+    except Exception:
+        pass
+    return boxes
 
 
 def _restore(page: pymupdf.Page, fonts: DocFonts, chars: list[Char]) -> None:

@@ -287,15 +287,21 @@ def _complete_tables(tt: TTFont, psname: str) -> None:
     """
     fb = FontBuilder(font=tt)
     upem = tt["head"].unitsPerEm
-    if "name" not in tt or not tt["name"].getDebugName(6):
-        base, style = split_font_name(psname)
-        weight, italic, _ = _style_info(style)
-        style_name = ("Bold " if (weight or 400) >= 600 else "") + ("Italic" if italic else "")
-        fb.setupNameTable({
-            "familyName": pretty_family(base),
-            "styleName": style_name.strip() or "Regular",
-            "psName": re.sub(r"[^A-Za-z0-9-]", "", psname)[:63] or "PlumeFont",
-        })
+    # Always (re)write the names from the PDF BaseFont: subsets often carry no
+    # family name at all, and MuPDF names the fonts it embeds after it.
+    base, style = split_font_name(psname)
+    weight, italic, _ = _style_info(style)
+    bold = (weight or 400) >= 600
+    style_name = ("Bold " if bold else "") + ("Italic" if italic else "")
+    style_name = style_name.strip() or "Regular"
+    family = pretty_family(base)
+    fb.setupNameTable({
+        "familyName": family,
+        "styleName": style_name,
+        "fullName": f"{family} {style_name}",
+        "psName": re.sub(r"[^A-Za-z0-9-]", "", psname)[:63] or "PlumeFont",
+        "uniqueFontIdentifier": f"Plume:{psname}",
+    })
     if "post" not in tt:
         fb.setupPost()
     if "OS/2" not in tt:
