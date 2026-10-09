@@ -52,10 +52,11 @@ export function ImageLayer(props: Props) {
     }
   }, [shownRev, committing, onDragging]);
 
-  const display = (img: PageImage): [number, number, number, number] => {
-    const r = rectToScreen(matrix, img.bbox);
+  const displayRect = (box: [number, number, number, number]): [number, number, number, number] => {
+    const r = rectToScreen(matrix, box);
     return [r[0] * zoom, r[1] * zoom, r[2] * zoom, r[3] * zoom];
   };
+  const display = (img: PageImage) => displayRect(img.bbox);
 
   // Paint the image's pixels (taken from the page picture) into the drag ghost.
   useEffect(() => {
@@ -80,6 +81,7 @@ export function ImageLayer(props: Props) {
     e.stopPropagation();
     onSelect(img.id);
     const rect = display(img);
+    const limits = img.bounds ? displayRect(img.bounds) : null;
     const d: Drag = { id: img.id, mode, startX: e.clientX, startY: e.clientY, rect, current: rect };
     setDrag(d);
     let announced = false;
@@ -97,14 +99,22 @@ export function ImageLayer(props: Props) {
       const [x0, y0, x1, y1] = d.rect;
       let next: [number, number, number, number];
       if (mode === "move") {
-        next = [x0 + dx, y0 + dy, x1 + dx, y1 + dy];
+        let mx = dx;
+        let my = dy;
+        if (limits) {
+          // Stay inside the clipping frame, where the image remains visible.
+          if (x1 - x0 <= limits[2] - limits[0]) mx = Math.min(Math.max(mx, limits[0] - x0), limits[2] - x1);
+          if (y1 - y0 <= limits[3] - limits[1]) my = Math.min(Math.max(my, limits[1] - y0), limits[3] - y1);
+        }
+        next = [x0 + mx, y0 + my, x1 + mx, y1 + my];
       } else {
         const w = x1 - x0;
         const h = y1 - y0;
         // Proportional resize from the bottom-right corner, following the axis
         // along which the pointer moved the most (relative to the image size).
         const ratio = Math.abs(dx) / w >= Math.abs(dy) / h ? (w + dx) / w : (h + dy) / h;
-        const s = Math.max(12 / Math.max(w, h), ratio);
+        let s = Math.max(12 / Math.max(w, h), ratio);
+        if (limits) s = Math.min(s, (limits[2] - x0) / w, (limits[3] - y0) / h);
         next = [x0, y0, x0 + w * s, y0 + h * s];
       }
       const cur = dragRef.current;
@@ -155,7 +165,13 @@ export function ImageLayer(props: Props) {
             key={img.id}
             className={`image-outline${isSel ? " selected" : ""}${img.movable ? "" : " locked"}${live ? " dragging" : ""}`}
             style={{ left: x0, top: y0, width: x1 - x0, height: y1 - y0 }}
-            title={img.movable ? "Image : glisser pour déplacer" : img.reason}
+            title={
+              !img.movable
+                ? img.reason
+                : img.bounds
+                  ? "Image dans un cadre du document : elle se déplace à l'intérieur de ce cadre"
+                  : "Image : glisser pour déplacer"
+            }
             onPointerDown={(e) => start(e, img, "move")}
             onClick={(e) => {
               e.stopPropagation();

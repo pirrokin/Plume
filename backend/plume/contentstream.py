@@ -159,10 +159,12 @@ class Drawing:
     name: str | None
     xref: int
     ctm: pymupdf.Matrix  # maps the unit square (image) or form space to PDF user space
-    start: int
+    start: int  # byte range to transform: the drawing group (q … Q) or the operation alone
     end: int
-    bbox_pdf: pymupdf.Rect = field(default_factory=pymupdf.Rect)
+    bbox_pdf: pymupdf.Rect = field(default_factory=pymupdf.Rect)  # visible area, PDF user space
     stream: int = 0  # 0: the page content; otherwise the xref of the form holding the drawing
+    anchor: pymupdf.Matrix | None = None  # CTM where the range starts (defaults to `ctm`)
+    bounds_pdf: pymupdf.Rect | None = None  # clip outside the range, which still applies once moved
 
 
 def _num(operand) -> float:
@@ -246,37 +248,112 @@ def _form_matrix(doc: pymupdf.Document, xref: int) -> pymupdf.Matrix:
     return pymupdf.Matrix(*nums) if len(nums) == 6 else pymupdf.Matrix(1, 0, 0, 1, 0, 0)
 
 
+# Operators allowed in a drawing group besides the image itself: graphics
+# state, clipping paths and marked content. Anything that paints makes the
+# group belong to more than the image.
+_GROUP_OPS = {
+    "q", "Q", "cm", "re", "m", "l", "c", "v", "y", "h", "W", "W*", "n", "gs", "w", "J", "j", "M", "d",
+    "ri", "i", "BDC", "BMC", "EMC", "MP", "DP", "BX", "EX",
+}
+_PATH_OPS = {"re", "m", "l", "c", "v", "y", "h"}
+
+
+@dataclass
+class _Block:
+    start: int
+    ctm: pymupdf.Matrix
+    clip: pymupdf.Rect | None
+    clean: bool = True
+    images: int = 0
+    drawings: list = field(default_factory=list)
+
+
+def _points(op: Op) -> list[tuple[float, float]]:
+    nums = [v for k, v in op.operands if k == "num"] if all(isinstance(x, tuple) for x in op.operands) else []
+    if op.operator == "re" and len(nums) == 4:
+        x, y, w, h = nums
+        return [(x, y), (x + w, y + h)]
+    return [(nums[i], nums[i + 1]) for i in range(0, len(nums) - 1, 2)]
+
+
 def _scan(doc: pymupdf.Document, data: bytes, resources: str | None, base: pymupdf.Matrix, stream: int,
           found: list[Drawing], depth: int, seen: set[int]) -> None:
     ops = parse_ops(data)
     xobjs = _xobjects(doc, resources)
     ctm = pymupdf.Matrix(base)
-    stack: list[pymupdf.Matrix] = []
+    clip: pymupdf.Rect | None = None
+    path: pymupdf.Rect | None = None
+    pending_clip = False
+    state: list[tuple[pymupdf.Matrix, pymupdf.Rect | None]] = []
+    blocks: list[_Block] = []
+
+    def draw(d: Drawing) -> None:
+        d.anchor = pymupdf.Matrix(ctm)
+        d.bounds_pdf = pymupdf.Rect(clip) if clip is not None else None
+        if clip is not None:
+            visible = d.bbox_pdf & clip
+            if not visible.is_empty:
+                d.bbox_pdf = visible
+        for b in blocks:
+            b.images += 1
+        if blocks:
+            blocks[-1].drawings.append(d)
+        found.append(d)
+
     for op in ops:
         o = op.operator
+        if o not in _GROUP_OPS and o not in ("Do", "BI"):
+            for b in blocks:
+                b.clean = False
         if o == "q":
-            stack.append(pymupdf.Matrix(ctm))
+            state.append((pymupdf.Matrix(ctm), pymupdf.Rect(clip) if clip is not None else None))
+            blocks.append(_Block(op.start, pymupdf.Matrix(ctm), pymupdf.Rect(clip) if clip is not None else None))
         elif o == "Q":
-            if stack:
-                ctm = stack.pop()
+            if state:
+                ctm, clip = state.pop()
+            if blocks:
+                b = blocks.pop()
+                # The innermost group drawing exactly one image (with its own clip,
+                # as Word and LibreOffice do) moves as a whole, clip included.
+                if b.clean and b.images == 1 and len(b.drawings) == 1:
+                    d = b.drawings[0]
+                    d.start, d.end = b.start, op.end
+                    d.anchor = b.ctm
+                    d.bounds_pdf = b.clip
+                elif blocks:
+                    blocks[-1].drawings.extend(b.drawings)
         elif o == "cm" and len(op.operands) == 6:
             ctm = pymupdf.Matrix(*[_num(x) for x in op.operands]) * ctm
+        elif o in _PATH_OPS:
+            for x, y in _points(op):
+                p = pymupdf.Point(x, y) * ctm
+                path = pymupdf.Rect(p, p) if path is None else path | p
+        elif o in ("W", "W*"):
+            pending_clip = True
+        elif o in ("n", "f", "F", "f*", "S", "s", "B", "B*", "b", "b*"):
+            if pending_clip and path is not None:
+                clip = pymupdf.Rect(path) if clip is None else clip & path
+            pending_clip = False
+            path = None
         elif o == "BI":
-            found.append(Drawing("inline", None, 0, pymupdf.Matrix(ctm), op.start, op.end, _unit_bbox(ctm), stream))
+            draw(Drawing("inline", None, 0, pymupdf.Matrix(ctm), op.start, op.end, _unit_bbox(ctm), stream))
         elif o == "Do" and op.operands and op.operands[-1][0] == "name":
             name = op.operands[-1][1].decode("latin-1").lstrip("/")
             xref = xobjs.get(name)
             if not xref:
+                for b in blocks:
+                    b.clean = False
                 continue
             subtype = doc.xref_get_key(xref, "Subtype")[1]
             if subtype == "/Image":
-                found.append(Drawing("image", name, xref, pymupdf.Matrix(ctm), op.start, op.end,
-                                     _unit_bbox(ctm), stream))
-            elif subtype == "/Form":
-                if _form_is_image_only(doc, xref):
-                    found.append(Drawing("form", name, xref, pymupdf.Matrix(ctm), op.start, op.end,
-                                         _form_bbox(doc, xref, ctm), stream))
-                elif depth < 4 and xref not in seen:
+                draw(Drawing("image", name, xref, pymupdf.Matrix(ctm), op.start, op.end, _unit_bbox(ctm), stream))
+            elif subtype == "/Form" and _form_is_image_only(doc, xref):
+                draw(Drawing("form", name, xref, pymupdf.Matrix(ctm), op.start, op.end,
+                             _form_bbox(doc, xref, ctm), stream))
+            else:
+                for b in blocks:
+                    b.clean = False
+                if subtype == "/Form" and depth < 4 and xref not in seen:
                     # A group holding other things too (Canva puts the whole page in one):
                     # look for the images inside it.
                     seen.add(xref)
@@ -299,8 +376,10 @@ def wrap(data: bytes, drawing: Drawing, transform: pymupdf.Matrix | None) -> byt
     """Content with `drawing` placed through `transform` (in PDF user space), or removed."""
     if transform is None:
         return data[:drawing.start] + b" " + data[drawing.end:]
-    # Inserting "M cm" before the operation gives CTM' = M × CTM; we want CTM × T.
-    m = drawing.ctm * transform * ~drawing.ctm
+    # Inserting "M cm" where the CTM is A gives everything after it M × A × …;
+    # we want A × T, hence M = A × T × A⁻¹.
+    a = drawing.anchor if drawing.anchor is not None else drawing.ctm
+    m = a * transform * ~a
     cm = " ".join(f"{v:.6f}".rstrip("0").rstrip(".") or "0" for v in (m.a, m.b, m.c, m.d, m.e, m.f))
     return (data[:drawing.start] + f"q {cm} cm ".encode() + data[drawing.start:drawing.end] + b" Q"
             + data[drawing.end:])

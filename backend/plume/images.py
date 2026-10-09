@@ -33,11 +33,14 @@ class PageImage:
     movable: bool
     reason: str = ""
 
+    bounds: pymupdf.Rect | None = None  # the image stays visible only inside this area
+
     def public(self) -> dict:
         return {
             "id": self.id,
             "sig": self.sig,
             "bbox": [self.bbox.x0, self.bbox.y0, self.bbox.x1, self.bbox.y1],
+            "bounds": [self.bounds.x0, self.bounds.y0, self.bounds.x1, self.bounds.y1] if self.bounds else None,
             "background": self.background,
             "movable": self.movable,
             "reason": self.reason,
@@ -102,7 +105,14 @@ def list_images(doc: pymupdf.Document, page: pymupdf.Page) -> list[PageImage]:
         movable = not shared[d.stream]
         reason = "" if movable else "Cette image est partagée avec d'autres pages."
         sig = hashlib.sha1(f"{d.stream}:{d.start}:{d.end}:{tuple(d.ctm)}".encode()).hexdigest()[:10]
-        images.append(PageImage(f"i{i}", sig, bbox, d, background, movable, reason))
+        bounds = None
+        if d.bounds_pdf is not None:
+            # A clip that is not part of the image's own group (e.g. a table cell):
+            # moving the image outside of it would hide the image.
+            b = d.bounds_pdf.transform(to_page)
+            if abs(b) < 0.95 * page_area:
+                bounds = b
+        images.append(PageImage(f"i{i}", sig, bbox, d, background, movable, reason, bounds))
     return images
 
 

@@ -83,6 +83,8 @@ export interface PageImage {
   id: string;
   sig: string;
   bbox: [number, number, number, number];
+  /** Area outside of which the image would be hidden by a clip (e.g. a table cell). */
+  bounds: [number, number, number, number] | null;
   background: boolean;
   movable: boolean;
   reason: string;

@@ -64,3 +64,57 @@ def test_move_scale_delete(tmp_path, variant):
     # The result survives a save / reload.
     reloaded = pymupdf.open("pdf", doc.tobytes(garbage=1))
     assert reloaded[0].get_image_info() == []
+
+
+def _red_share(page, rect):
+    """Share of clearly red pixels of the rendered page inside `rect`."""
+    pix = page.get_pixmap(dpi=72, clip=rect)
+    data = pix.samples
+    n = pix.n
+    red = total = 0
+    for i in range(0, len(data) - n + 1, n * 3):
+        total += 1
+        r, g, b = data[i], data[i + 1], data[i + 2]
+        if r > 150 and g < 90 and b < 90:
+            red += 1
+    return red / max(total, 1)
+
+
+def _word_style_pdf(path, outer_clip=False):
+    """Images drawn like Microsoft Word: q, clip rectangle, cm, Do, Q."""
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    pix.set_rect(pix.irect, (200, 30, 30))
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(pymupdf.Rect(0, 0, 10, 10), pixmap=pix)  # registers the image resource
+    xref = page.get_images()[0][0]
+    name = page.get_images(full=True)[0][7]
+    prefix = "q 50 400 300 300 re W n " if outer_clip else ""
+    suffix = " Q" if outer_clip else ""
+    content = f"{prefix}q 100 500 200 150 re W* n 200 0 0 150 100 500 cm /{name} Do Q{suffix}"
+    doc.update_stream(page.get_contents()[0], content.encode())
+    doc.save(path)
+    return pymupdf.open(path), xref
+
+
+def test_word_clipped_image_moves_with_its_clip(tmp_path):
+    doc, _ = _word_style_pdf(tmp_path / "word.pdf")
+    page = doc[0]
+    img = list_images(doc, page)[0]
+    old = pymupdf.Rect(img.bbox)
+    assert _red_share(page, old) > 0.9
+    transform_image(doc, page, img, 150, -170)
+    page = doc[0]
+    new = old + (150, -170, 150, -170)
+    assert (old & new).is_empty
+    # Entirely visible at the new place (its clip moved too), gone from the old one.
+    assert _red_share(page, new) > 0.9
+    assert _red_share(page, old) < 0.05
+
+
+def test_outer_clip_is_reported_as_bounds(tmp_path):
+    doc, _ = _word_style_pdf(tmp_path / "cell.pdf", outer_clip=True)
+    page = doc[0]
+    img = list_images(doc, page)[0]
+    assert img.bounds is not None
+    assert abs(img.bounds.x0 - 50) < 0.5 and abs(img.bounds.y1 - (842 - 400)) < 0.5
