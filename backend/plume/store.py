@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import secrets
@@ -41,6 +42,7 @@ class Document:
         self.doc: pymupdf.Document = pymupdf.open(self._path(self.version))
         self.fonts = DocFonts(self.doc)
         self._models: dict[tuple[int, int], dict] = {}
+        self._revs: tuple[int, list[str]] | None = None
 
     # ---------------------------------------------------------------- state
     @property
@@ -61,7 +63,23 @@ class Document:
         self.doc = pymupdf.open(self._path(self.version))
         self.fonts = DocFonts(self.doc)
 
+    def page_revs(self) -> list[str]:
+        """Fingerprint of each page; it changes only when the page itself changes."""
+        if self._revs is None or self._revs[0] != self.version:
+            revs = []
+            for page in self.doc:
+                h = hashlib.sha1(self.doc.xref_object(page.xref, compressed=True).encode())
+                for cx in page.get_contents():
+                    h.update(self.doc.xref_stream_raw(cx) or b"")
+                typ, val = self.doc.xref_get_key(page.xref, "Resources")
+                if typ == "xref":
+                    h.update(self.doc.xref_object(int(val.split()[0]), compressed=True).encode())
+                revs.append(h.hexdigest()[:12])
+            self._revs = (self.version, revs)
+        return self._revs[1]
+
     def info(self) -> dict:
+        revs = self.page_revs()
         pages = []
         for page in self.doc:
             unrot = page.rect * page.derotation_matrix
@@ -73,6 +91,7 @@ class Document:
                 "rotation": page.rotation,
                 "unrotated": [abs(unrot.width), abs(unrot.height)],
                 "matrix": [m.a, m.b, m.c, m.d, m.e, m.f],
+                "rev": revs[page.number],
             })
         return {
             "id": self.id,
@@ -101,6 +120,7 @@ class Document:
         return {
             "page": page_no,
             "version": self.version,
+            "rev": self.page_revs()[page_no],
             "blocks": model["blocks"],
             "others": model["others"],
             "families": [self.fonts.family(f).describe() for f in families],

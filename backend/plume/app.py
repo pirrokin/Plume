@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__, config
 from .fontindex import get_index
+from .fontnames import generic_class
 from .store import MUPDF_LOCK, DocumentError, Store
 
 log = logging.getLogger("plume")
@@ -138,18 +139,21 @@ def page_image(
     doc_id: str,
     page_no: int,
     scale: float = Query(1.5, gt=0.05, le=8),
-    v: int | None = None,
+    rev: str | None = None,
     hide: str | None = None,
 ) -> Response:
     with MUPDF_LOCK:
         doc = store.get(doc_id)
-        version = doc.version
-        key = (doc_id, version, page_no, round(scale, 3), hide)
+        doc._check_page(page_no)
+        current = doc.page_revs()[page_no]
+        # Block ids are only stable within a version.
+        key = (doc_id, page_no, current, round(scale, 3), hide, doc.version if hide else None)
         data = png_cache.get(key)
         if data is None:
             data = doc.render(page_no, scale, hide)
             png_cache.put(key, data)
-    headers = {"Cache-Control": "private, max-age=31536000, immutable" if v == version else "no-cache"}
+    immutable = rev == current and not hide
+    headers = {"Cache-Control": "private, max-age=31536000, immutable" if immutable else "no-cache"}
     return Response(data, media_type="image/png", headers=headers)
 
 
@@ -234,7 +238,7 @@ def embedded_font(doc_id: str, xref: int) -> Response:
 
 @app.get("/api/fonts")
 def fonts() -> list[dict]:
-    return get_index().families()
+    return [dict(f, generic=generic_class(f["name"])) for f in get_index().families()]
 
 
 @app.get("/api/fonts/sys/{face_id}")
