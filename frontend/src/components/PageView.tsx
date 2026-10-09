@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { api, Block, EditResult, PageInfo, PageModel } from "../api";
 import { cssMatrix, Matrix, renderScale, screenToPage } from "../geometry";
 import { ActiveEdit, BlockEditor, EditorController, FormatState } from "./BlockEditor";
+import { ImageChange, ImageLayer } from "./ImageLayer";
 
 export type Tool = "edit" | "add";
 
@@ -15,6 +16,10 @@ interface Props {
   active: ActiveEdit | null;
   scanned: boolean;
   ocrRunning: boolean;
+  selectedImage: string | null;
+  imageBusy: boolean;
+  onSelectImage(page: number, id: string | null): void;
+  onImageChange(page: number, change: ImageChange): Promise<boolean>;
   onOcr(page: number): void;
   onVisible(index: number): void;
   onBlockClick(page: number, block: Block, click: { x: number; y: number }): void;
@@ -79,11 +84,24 @@ function PageViewInner(props: Props) {
 
   const editing = active && active.page === page.index ? active : null;
   const hide = editing?.block && !editing.closing ? editing.block.id : undefined;
+  const [draggedImage, setDraggedImage] = useState<string | null>(null);
   const scale = renderScale(zoom);
-  const src = visible ? api.imageUrl(docId, page.index, scale, page.rev, hide) : null;
+  const src = visible ? api.imageUrl(docId, page.index, scale, page.rev, hide, draggedImage ?? undefined) : null;
+  const [shownRev, setShownRev] = useState<string | null>(null);
   const shown = usePageImage(src, () => {
-    if (!hide) props.onImageShown(page.index, page.rev);
+    if (!hide && !draggedImage) {
+      setShownRev(page.rev);
+      props.onImageShown(page.index, page.rev);
+    }
   });
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  // Prepare the picture without the selected image, shown while it is dragged.
+  useEffect(() => {
+    if (!visible || !props.selectedImage) return;
+    const pre = new Image();
+    pre.src = api.imageUrl(docId, page.index, scale, page.rev, undefined, props.selectedImage);
+  }, [visible, props.selectedImage, docId, page.index, scale, page.rev]);
 
   const [uw, uh] = page.unrotated;
   const matrix = page.matrix as Matrix;
@@ -102,8 +120,22 @@ function PageViewInner(props: Props) {
       data-page={page.index}
       style={{ width: page.width * zoom, height: page.height * zoom }}
     >
-      {shown ? <img className="page-img" src={shown} alt="" draggable={false} /> : <div className="page-loading" />}
+      {shown ? <img ref={imgRef} className="page-img" src={shown} alt="" draggable={false} /> : <div className="page-loading" />}
       <div className="page-surface" onClick={onSurfaceClick} />
+      {tool === "edit" && !editing && model?.rev === page.rev && model.images?.length > 0 && (
+        <ImageLayer
+          page={page}
+          zoom={zoom}
+          images={model.images}
+          selected={props.selectedImage}
+          busy={props.imageBusy}
+          pageImg={imgRef.current}
+          shownRev={shownRev}
+          onSelect={(id) => props.onSelectImage(page.index, id)}
+          onDragging={setDraggedImage}
+          onChange={(change) => props.onImageChange(page.index, change)}
+        />
+      )}
       <div
         className="page-overlay"
         style={{ width: uw * zoom, height: uh * zoom, transform: cssMatrix(matrix, zoom) }}

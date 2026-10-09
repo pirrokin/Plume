@@ -6,10 +6,22 @@ client = TestClient(app)
 
 
 def _upload(path):
-    with open(path, "rb") as fh:
-        r = client.post("/api/documents", files={"file": ("sample.pdf", fh, "application/pdf")})
+    r = client.post("/api/documents", params={"name": "sample.pdf"}, content=path.read_bytes(),
+                    headers={"Content-Type": "application/pdf"})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+def test_multipart_upload_still_works(sample_pdf):
+    with open(sample_pdf, "rb") as fh:
+        r = client.post("/api/documents", files={"file": ("multi.pdf", fh, "application/pdf")})
+    assert r.status_code == 200 and r.json()["name"] == "multi.pdf"
+
+
+def test_unknown_api_and_server_error_pages():
+    assert client.get("/api/nope").status_code == 404
+    r = client.get("/406.shtml")
+    assert r.status_code == 406 and "hébergeur" in r.json()["detail"]
 
 
 def test_full_flow(sample_pdf):
@@ -55,10 +67,8 @@ def test_full_flow(sample_pdf):
 
 
 def test_rejects_non_pdf(tmp_path):
-    p = tmp_path / "x.pdf"
-    p.write_bytes(b"hello")
-    with open(p, "rb") as fh:
-        r = client.post("/api/documents", files={"file": ("x.pdf", fh, "application/pdf")})
+    r = client.post("/api/documents", params={"name": "x.pdf"}, content=b"hello",
+                    headers={"Content-Type": "application/pdf"})
     assert r.status_code == 400
 
 
@@ -82,8 +92,7 @@ def test_page_operations(sample_pdf):
     assert len(info["pages"]) == 2
     info = op(0, version=info["version"], op="insert_blank")
     assert len(info["pages"]) == 3
-    with open(sample_pdf, "rb") as fh:
-        r = client.post(f"/api/documents/{doc_id}/merge", params={"version": info["version"]},
-                        files={"file": ("other.pdf", fh, "application/pdf")})
+    r = client.post(f"/api/documents/{doc_id}/merge", params={"version": info["version"], "name": "other.pdf"},
+                    content=sample_pdf.read_bytes(), headers={"Content-Type": "application/pdf"})
     assert r.status_code == 200 and len(r.json()["pages"]) == 5
     assert client.post(f"/api/documents/{doc_id}/undo").json()["pages"].__len__() == 3

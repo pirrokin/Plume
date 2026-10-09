@@ -27,6 +27,7 @@ from . import config
 from .docfonts import DocFonts
 from .editor import EditError, EditReport, add_block, delete_block, edit_block
 from .extract import extract_page
+from .images import ImageError, delete_image, find_image, list_images, render_without, transform_image
 
 log = logging.getLogger(__name__)
 
@@ -158,18 +159,30 @@ class Document:
     def public_model(self, page_no: int) -> dict:
         model = self.page_model(page_no)
         families = sorted({r["family"] for b in model["blocks"] for r in b["runs"]})
+        try:
+            images = [img.public() for img in list_images(self.doc, self.doc[page_no])]
+        except Exception as exc:  # unusual content streams: images are just not movable
+            log.info("images of page %d not listed: %s", page_no, exc)
+            images = []
         return {
             "page": page_no,
             "version": self.version,
             "rev": self.page_revs()[page_no],
             "blocks": model["blocks"],
             "others": model["others"],
+            "images": images,
             "families": [self.fonts.family(f).describe() for f in families],
         }
 
-    def render(self, page_no: int, scale: float, hide: str | None = None) -> bytes:
+    def render(self, page_no: int, scale: float, hide: str | None = None, hide_image: str | None = None) -> bytes:
         self._check_page(page_no)
         mat = pymupdf.Matrix(scale, scale)
+        if hide_image:
+            try:
+                img = find_image(self.doc, self.doc[page_no], hide_image, None)
+            except ImageError as exc:
+                raise DocumentError(str(exc), 404) from exc
+            return render_without(self.doc, self.doc[page_no], img, mat)
         if not hide:
             return self.doc[page_no].get_pixmap(matrix=mat, alpha=False).tobytes("png")
         model = self.page_model(page_no)
@@ -281,6 +294,27 @@ class Document:
         if not "".join(r.get("text", "") for r in runs).strip():
             raise DocumentError("Texte vide")
         return self._commit(lambda: add_block(self.doc, self.fonts, page_no, runs, box))
+
+    # ---------------------------------------------------------------- images
+    def image_op(self, page_no: int, image_id: str, version: int | None, sig: str | None, action: str,
+                 dx: float = 0.0, dy: float = 0.0, scale: float = 1.0) -> None:
+        self._check_version(version)
+        self._check_page(page_no)
+
+        def run():
+            page = self.doc[page_no]
+            try:
+                img = find_image(self.doc, page, image_id, sig)
+                if action == "move":
+                    transform_image(self.doc, page, img, dx, dy, scale)
+                elif action == "delete":
+                    delete_image(self.doc, page, img)
+                else:
+                    raise EditError(f"Action inconnue : {action}")
+            except ImageError as exc:
+                raise EditError(str(exc)) from exc
+
+        self._commit(run)
 
     # ---------------------------------------------------------------- pages
     def page_op(self, op: str, page_no: int, version: int | None, angle: int = 90, to: int | None = None) -> None:

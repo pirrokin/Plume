@@ -854,3 +854,68 @@ button {
   color: var(--danger);
   font-size: 13px;
 }
+
+/* ------------------------------------------------------------------ images */
+.image-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.image-ghost {
+  position: absolute;
+  inset: 0;
+}
+.image-outline {
+  position: absolute;
+  pointer-events: auto;
+  cursor: move;
+  outline: 1px dashed transparent;
+  outline-offset: 1px;
+}
+.page.tool-edit:hover .image-outline {
+  outline-color: rgba(15, 157, 88, 0.35);
+}
+.image-outline:hover {
+  outline: 1.5px solid #0f9d58 !important;
+}
+.image-outline.selected {
+  outline: 2px solid #0f9d58 !important;
+  box-shadow: 0 0 0 4px rgba(15, 157, 88, 0.15);
+}
+.image-outline.locked {
+  cursor: not-allowed;
+}
+.image-outline.dragging {
+  outline: 2px solid #0f9d58 !important;
+  box-shadow: 0 8px 28px rgba(16, 24, 40, 0.25);
+  z-index: 4;
+}
+.image-ghost {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+.image-outline .image-handle {
+  z-index: 2;
+}
+.image-handle {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: white;
+  border: 2px solid #0f9d58;
+  cursor: nwse-resize;
+}
+.image-bar .image-bar-title {
+  font-weight: 600;
+  color: #0f7a46;
+}
+.image-bar .hint {
+  color: var(--muted);
+  font-size: 13px;
+}

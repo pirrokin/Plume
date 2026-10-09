@@ -29,3 +29,16 @@ export function renderScale(zoom: number): number {
   const target = zoom * Math.min(window.devicePixelRatio || 1, 3);
   return RENDER_STEPS.find((s) => s >= target - 0.01) ?? RENDER_STEPS[RENDER_STEPS.length - 1];
 }
+
+/** Axis-aligned display rectangle of a rectangle given in unrotated page space. */
+export function rectToScreen(m: Matrix, r: [number, number, number, number]): [number, number, number, number] {
+  const pts = [
+    pageToScreen(m, r[0], r[1]),
+    pageToScreen(m, r[2], r[1]),
+    pageToScreen(m, r[0], r[3]),
+    pageToScreen(m, r[2], r[3]),
+  ];
+  const xs = pts.map((p) => p[0]);
+  const ys = pts.map((p) => p[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}

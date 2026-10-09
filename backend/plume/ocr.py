@@ -25,9 +25,11 @@ from .writer import remove_chars, textwriter_correction
 
 log = logging.getLogger(__name__)
 
-TESSDATA = Path(os.environ.get("PLUME_TESSDATA", config.DATA_DIR / "tessdata"))
+# "fast" models: on a shared server they read a page about 6 times faster than
+# the "best" ones, with the same result on ordinary printed documents.
+TESSDATA = Path(os.environ.get("PLUME_TESSDATA", config.DATA_DIR / "tessdata-fast"))
 MODEL_URL = os.environ.get(
-    "PLUME_TESSDATA_URL", "https://github.com/tesseract-ocr/tessdata_best/raw/main/{lang}.traineddata"
+    "PLUME_TESSDATA_URL", "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata"
 )
 DEFAULT_LANGUAGES = os.environ.get("PLUME_OCR_LANGUAGES", "fra+eng")
 _download_lock = threading.Lock()

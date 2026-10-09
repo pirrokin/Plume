@@ -79,11 +79,21 @@ export interface FamilyInfo {
   substitute?: string | null;
 }
 
+export interface PageImage {
+  id: string;
+  sig: string;
+  bbox: [number, number, number, number];
+  background: boolean;
+  movable: boolean;
+  reason: string;
+}
+
 export interface PageModel {
   page: number;
   version: number;
   rev: string;
   blocks: Block[];
+  images: PageImage[];
   others: { bbox: number[]; text: string; reason: string }[];
   families: FamilyInfo[];
 }
@@ -152,10 +162,13 @@ function json(method: string, body: unknown): RequestInit {
 const base = (id: string) => `/api/documents/${encodeURIComponent(id)}`;
 
 export const api = {
+  // The PDF is sent as the raw request body: the hosting firewall rejects multipart uploads.
   upload(file: File): Promise<DocInfo> {
-    const form = new FormData();
-    form.append("file", file, file.name);
-    return request<DocInfo>("/api/documents", { method: "POST", body: form });
+    return request<DocInfo>(`/api/documents?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf" },
+      body: file,
+    });
   },
   session: () => request<{ required: boolean; authenticated: boolean }>("/api/session"),
   login: (password: string) => request<{ authenticated: boolean }>("/api/login", json("POST", { password })),
@@ -183,18 +196,27 @@ export const api = {
   pageOp: (id: string, page: number, body: { version: number; op: string; angle?: number; to?: number }) =>
     request<DocInfo>(`${base(id)}/pages/${page}/op`, json("POST", body)),
   merge(id: string, file: File, version: number): Promise<DocInfo> {
-    const form = new FormData();
-    form.append("file", file, file.name);
-    return request<DocInfo>(`${base(id)}/merge?version=${version}`, { method: "POST", body: form });
+    return request<DocInfo>(`${base(id)}/merge?version=${version}&name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf" },
+      body: file,
+    });
   },
   undo: (id: string) => request<DocInfo>(`${base(id)}/undo`, { method: "POST" }),
   redo: (id: string) => request<DocInfo>(`${base(id)}/redo`, { method: "POST" }),
   fonts: () => request<FamilyInfo[]>("/api/fonts"),
-  imageUrl(id: string, page: number, scale: number, rev: string, hide?: string): string {
+  imageUrl(id: string, page: number, scale: number, rev: string, hide?: string, hideImage?: string): string {
     const q = new URLSearchParams({ scale: scale.toFixed(2), rev });
     if (hide) q.set("hide", hide);
+    if (hideImage) q.set("hideImage", hideImage);
     return `${base(id)}/pages/${page}/image?${q}`;
   },
+  imageOp: (
+    id: string,
+    page: number,
+    imageId: string,
+    body: { version: number; sig: string; action: "move" | "delete"; dx?: number; dy?: number; scale?: number },
+  ) => request<{ info: DocInfo; page: PageModel }>(`${base(id)}/pages/${page}/images/${encodeURIComponent(imageId)}`, json("POST", body)),
   downloadUrl: (id: string) => `${base(id)}/download`,
   fontsCssUrl: (id: string, families: string[]) =>
     `${base(id)}/fonts.css?families=${encodeURIComponent(families.join(","))}`,

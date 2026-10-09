@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -223,13 +224,37 @@ def _report(report: Any) -> dict:
 
 
 # ---------------------------------------------------------------- documents
-@app.post("/api/documents")
-async def upload(file: UploadFile = File(...)) -> dict:
-    data = await file.read()
-    if len(data) > config.MAX_UPLOAD_MB * 1024 * 1024:
+async def _read_pdf(request: Request, name: str) -> tuple[bytes, str]:
+    """PDF sent as the raw request body (multipart is still accepted for local use).
+
+    Raw bodies are preferred: o2switch's web application firewall rejects
+    multipart file uploads.
+    """
+    limit = config.MAX_UPLOAD_MB * 1024 * 1024
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit + 4096:
         raise HTTPException(413, f"Fichier trop volumineux (max {config.MAX_UPLOAD_MB} Mo).")
+    if request.headers.get("content-type", "").startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or isinstance(upload, str):
+            raise HTTPException(400, "Aucun fichier reçu.")
+        data = await upload.read()
+        name = upload.filename or name
+    else:
+        data = await request.body()
+    if len(data) > limit:
+        raise HTTPException(413, f"Fichier trop volumineux (max {config.MAX_UPLOAD_MB} Mo).")
+    if not data:
+        raise HTTPException(400, "Aucun fichier reçu.")
+    return data, (name or "document.pdf")[:200]
+
+
+@app.post("/api/documents")
+async def upload(request: Request, name: str = "document.pdf") -> dict:
+    data, filename = await _read_pdf(request, name)
     with MUPDF_LOCK:
-        doc = store.create(data, file.filename or "document.pdf")
+        doc = store.create(data, filename)
         return doc.info()
 
 
@@ -246,18 +271,20 @@ def page_image(
     scale: float = Query(1.5, gt=0.05, le=8),
     rev: str | None = None,
     hide: str | None = None,
+    hideImage: str | None = None,
 ) -> Response:
     with MUPDF_LOCK:
         doc = store.get(doc_id)
         doc._check_page(page_no)
         current = doc.page_revs()[page_no]
-        # Block ids are only stable within a version.
-        key = (doc_id, page_no, current, round(scale, 3), hide, doc.version if hide else None)
+        # Block and image ids are only stable within a version.
+        hidden = hide or hideImage
+        key = (doc_id, page_no, current, round(scale, 3), hide, hideImage, doc.version if hidden else None)
         data = png_cache.get(key)
         if data is None:
-            data = doc.render(page_no, scale, hide)
+            data = doc.render(page_no, scale, hide, hideImage)
             png_cache.put(key, data)
-    immutable = rev == current and not hide
+    immutable = rev == current and not hidden
     headers = {"Cache-Control": "private, max-age=31536000, immutable" if immutable else "no-cache"}
     return Response(data, media_type="image/png", headers=headers)
 
@@ -306,6 +333,23 @@ def ocr(doc_id: str, page_no: int, body: OcrBody) -> dict:
         return {"info": doc.info(), "page": doc.public_model(page_no), "words": words}
 
 
+class ImageBody(BaseModel):
+    version: int | None = None
+    sig: str | None = None
+    action: str = "move"
+    dx: float = 0.0
+    dy: float = 0.0
+    scale: float = 1.0
+
+
+@app.post("/api/documents/{doc_id}/pages/{page_no}/images/{image_id}")
+def image_op(doc_id: str, page_no: int, image_id: str, body: ImageBody) -> dict:
+    with MUPDF_LOCK:
+        doc = store.get(doc_id)
+        doc.image_op(page_no, image_id, body.version, body.sig, body.action, body.dx, body.dy, body.scale)
+        return {"info": doc.info(), "page": doc.public_model(page_no)}
+
+
 class PageOpBody(BaseModel):
     version: int | None = None
     op: str
@@ -322,10 +366,9 @@ def page_op(doc_id: str, page_no: int, body: PageOpBody) -> dict:
 
 
 @app.post("/api/documents/{doc_id}/merge")
-async def merge(doc_id: str, file: UploadFile = File(...), at: int | None = None, version: int | None = None) -> dict:
-    data = await file.read()
-    if len(data) > config.MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, f"Fichier trop volumineux (max {config.MAX_UPLOAD_MB} Mo).")
+async def merge(doc_id: str, request: Request, at: int | None = None, version: int | None = None,
+                name: str = "document.pdf") -> dict:
+    data, _ = await _read_pdf(request, name)
     with MUPDF_LOCK:
         doc = store.get(doc_id)
         doc.merge(data, at, version)
@@ -432,7 +475,16 @@ if config.FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=config.FRONTEND_DIST / "assets"), name="assets")
 
     @app.get("/{path:path}")
-    def spa(path: str) -> FileResponse:
+    def spa(path: str) -> Response:
+        if path.startswith("api/"):
+            return JSONResponse({"detail": "Introuvable"}, status_code=404)
+        error = re.fullmatch(r"(\d{3})\.shtml", path)
+        if error:
+            # The web server replaced the request with its error page (e.g. the
+            # hosting firewall answered 406): report it instead of the app.
+            code = int(error.group(1))
+            return JSONResponse({"detail": f"Requête refusée par l'hébergeur (erreur {code})."},
+                                status_code=code if 400 <= code < 500 else 422)
         target = (config.FRONTEND_DIST / path).resolve()
         if path and target.is_file() and config.FRONTEND_DIST in target.parents:
             return FileResponse(target)

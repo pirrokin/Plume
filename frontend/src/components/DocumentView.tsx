@@ -2,8 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, Block, DocInfo, EditResult, FamilyInfo, PageModel, Run } from "../api";
 import { registerFamilies } from "../fonts";
 import type { ActiveEdit, EditorController, FormatState } from "./BlockEditor";
+import type { ImageChange } from "./ImageLayer";
 import { FormatBar } from "./FormatBar";
-import { IconDownload, IconFeather, IconMinus, IconPlus, IconRedo, IconText, IconTextAdd, IconUndo, IconX } from "./icons";
+import {
+  IconCheck,
+  IconDownload,
+  IconFeather,
+  IconMinus,
+  IconPlus,
+  IconRedo,
+  IconText,
+  IconTextAdd,
+  IconTrash,
+  IconUndo,
+  IconX,
+} from "./icons";
 import { PageView, Tool } from "./PageView";
 import { PageOp, Sidebar } from "./Sidebar";
 import { useToasts } from "./Toasts";
@@ -59,6 +72,8 @@ export function DocumentView({ docId, onExit }: Props) {
   const [currentPage, setCurrentPage] = useState(0);
   const [ocrPages, setOcrPages] = useState<Set<number>>(new Set());
   const [pagesBusy, setPagesBusy] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<{ page: number; id: string } | null>(null);
+  const [imageBusy, setImageBusy] = useState(false);
   const controller = useRef<EditorController | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -321,6 +336,47 @@ export function DocumentView({ docId, onExit }: Props) {
     [info, commitActive, docId, fail, toasts],
   );
 
+  const selectImage = useCallback(
+    async (page: number, id: string | null) => {
+      if (id && activeRef.current && !(await commitActiveRef.current())) return;
+      setSelectedImage(id ? { page, id } : null);
+    },
+    [],
+  );
+
+  const imageAction = useCallback(
+    async (page: number, imageId: string, body: { action: "move" | "delete"; dx?: number; dy?: number; scale?: number }) => {
+      const model = models[page];
+      const img = model?.images.find((i) => i.id === imageId);
+      if (!info || !img) return false;
+      setImageBusy(true);
+      try {
+        const res = await api.imageOp(docId, page, imageId, { version: info.version, sig: img.sig, ...body });
+        registerFamilies(res.page.families);
+        setInfo(res.info);
+        setModels((prev) => ({ ...prev, [page]: res.page }));
+        setSelectedImage(null);
+        return true;
+      } catch (e) {
+        fail(e);
+        return false;
+      } finally {
+        setImageBusy(false);
+      }
+    },
+    [info, models, docId, fail],
+  );
+
+  const onImageChange = useCallback(
+    (page: number, change: ImageChange) =>
+      imageAction(page, change.image.id, { action: "move", dx: change.dx, dy: change.dy, scale: change.scale }),
+    [imageAction],
+  );
+
+  const deleteSelectedImage = useCallback(() => {
+    if (selectedImage) void imageAction(selectedImage.page, selectedImage.id, { action: "delete" });
+  }, [selectedImage, imageAction]);
+
   const runOcr = useCallback(
     async (page: number) => {
       if (!info || ocrPages.has(page)) return;
@@ -397,6 +453,30 @@ export function DocumentView({ docId, onExit }: Props) {
     const z = (el.clientWidth - 64) / w;
     setZoom(ZOOMS.reduce((best, v) => (Math.abs(v - z) < Math.abs(best - z) && v <= z + 0.01 ? v : best), ZOOMS[0]));
   }, [info]);
+
+  // Clicking elsewhere drops the image selection; Delete removes the image.
+  useEffect(() => {
+    if (!selectedImage) return;
+    const onDown = (ev: PointerEvent) => {
+      const t = ev.target as HTMLElement;
+      if (!t.closest(".image-outline, .subbar, .toasts")) setSelectedImage(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if ((ev.target as HTMLElement).closest("input, select, textarea, [contenteditable='true']")) return;
+      if (ev.key === "Delete" || ev.key === "Backspace") {
+        ev.preventDefault();
+        deleteSelectedImage();
+      } else if (ev.key === "Escape") {
+        setSelectedImage(null);
+      }
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [selectedImage, deleteSelectedImage]);
 
   // Click anywhere outside the edited block validates it.
   useEffect(() => {
@@ -518,14 +598,26 @@ export function DocumentView({ docId, onExit }: Props) {
         </button>
       </header>
 
-      <div className={`subbar${format && controller.current ? " open" : ""}`}>
+      <div className={`subbar${(format && controller.current) || selectedImage ? " open" : ""}`}>
         {format && controller.current ? (
           <FormatBar docId={docId} state={format} controller={controller.current} docFamilies={docFamilies} busy={busy} />
+        ) : selectedImage ? (
+          <div className="format-bar image-bar">
+            <span className="image-bar-title">Image sélectionnée</span>
+            <span className="hint">Glissez-la pour la déplacer, tirez le coin pour la redimensionner.</span>
+            <div className="spacer" />
+            <button className="btn ghost danger" onClick={deleteSelectedImage} disabled={imageBusy} title="Supprimer l'image (Suppr)">
+              <IconTrash size={16} /> Supprimer l'image
+            </button>
+            <button className="btn primary" onClick={() => setSelectedImage(null)} disabled={imageBusy}>
+              <IconCheck size={16} /> Terminé
+            </button>
+          </div>
         ) : (
           <div className="hint">
             {tool === "add"
               ? "Cliquez sur la page à l'endroit où ajouter du texte."
-              : "Cliquez sur un texte pour le modifier. Les blocs apparaissent au survol."}
+              : "Cliquez sur un texte pour le modifier, ou sur une image pour la déplacer."}
           </div>
         )}
       </div>
@@ -555,6 +647,10 @@ export function DocumentView({ docId, onExit }: Props) {
               active={active}
               scanned={info.scanned.includes(p.index)}
               ocrRunning={ocrPages.has(p.index)}
+              selectedImage={selectedImage?.page === p.index ? selectedImage.id : null}
+              imageBusy={imageBusy}
+              onSelectImage={selectImage}
+              onImageChange={onImageChange}
               onOcr={runOcr}
               onVisible={onVisible}
               onBlockClick={openBlock}
