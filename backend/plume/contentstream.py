@@ -254,6 +254,8 @@ def _form_matrix(doc: pymupdf.Document, xref: int) -> pymupdf.Matrix:
 _GROUP_OPS = {
     "q", "Q", "cm", "re", "m", "l", "c", "v", "y", "h", "W", "W*", "n", "gs", "w", "J", "j", "M", "d",
     "ri", "i", "BDC", "BMC", "EMC", "MP", "DP", "BX", "EX",
+    # Colours do not paint by themselves (they colour image masks).
+    "g", "G", "rg", "RG", "k", "K", "cs", "CS", "sc", "SC", "scn", "SCN",
 }
 _PATH_OPS = {"re", "m", "l", "c", "v", "y", "h"}
 
