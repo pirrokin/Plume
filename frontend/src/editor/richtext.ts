@@ -8,10 +8,10 @@
  * offsets.
  */
 import type { Run, Style } from "../api";
-import { fontStack } from "../fonts";
+import { familyInfo, fontStack } from "../fonts";
 
 export const STYLE_KEYS: (keyof Style)[] = [
-  "family", "weight", "italic", "size", "color", "alpha", "underline", "strike", "rise", "spacing", "render",
+  "family", "weight", "italic", "size", "color", "alpha", "underline", "strike", "rise", "spacing", "render", "outline",
 ];
 
 export function styleOf(r: Style): Style {
@@ -49,6 +49,8 @@ function rgba(hex: string, alpha: number): string {
 
 export function applyRunStyle(el: HTMLElement, s: Style, zoom: number): void {
   el.style.fontFamily = fontStack(s.family);
+  // Letters a titling font lacks are written as capitals by its look-alike.
+  el.style.textTransform = familyInfo(s.family).caps ? "uppercase" : "";
   el.style.fontWeight = String(s.weight);
   el.style.fontStyle = s.italic ? "italic" : "normal";
   el.style.fontSize = `${s.size * zoom}px`;
@@ -58,7 +60,9 @@ export function applyRunStyle(el: HTMLElement, s: Style, zoom: number): void {
   el.style.letterSpacing = s.spacing ? `${s.spacing * zoom}px` : "normal";
   el.style.verticalAlign = s.rise ? `${s.rise * zoom}px` : "baseline";
   if (s.render === "stroke") {
-    el.style.webkitTextStroke = `${Math.max(0.5, s.size * zoom * 0.03)}px ${rgba(s.color, s.alpha ?? 1)}`;
+    // Same width as the PDF writer: the run's outline, else 5 % of the size.
+    const width = (s.outline || 0.05) * s.size * zoom;
+    el.style.webkitTextStroke = `${Math.max(0.5, width)}px ${rgba(s.color, s.alpha ?? 1)}`;
     el.style.color = "transparent";
   } else {
     el.style.webkitTextStroke = "";

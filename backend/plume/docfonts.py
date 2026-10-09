@@ -8,15 +8,17 @@ editor and the PDF writer pick the same glyphs.
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, field
 
 import pymupdf
 
-from .fontindex import ALIASES, PROFILE_CHARS, Face, FontIndex, get_index
+from . import lookalike
+from .fontindex import ALIASES, Face, FontIndex, get_index
 from .googlefonts import google_fonts
 from .fontnames import css_weight_order, family_key, generic_class, parse_font_name, strip_subset
-from .pdffonts import PreparedFont, is_text_reliable, prepare_font
+from .pdffonts import PreparedFont, add_case_aliases, is_text_reliable, prepare_font
 
 _B14 = {
     ("sans", False, False): "helv", ("sans", True, False): "hebo",
@@ -28,6 +30,10 @@ _B14 = {
 }
 
 SYNTH_ITALIC_SKEW = 0.25  # same slant as Chrome's synthetic italic
+# How long writing waits for a missing family being downloaded, in seconds.
+DOWNLOAD_WAIT = 6.0
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,6 +41,21 @@ class FamRef:
     key: str
     weight: int
     italic: bool
+    # Drawing of the letters when the font itself tells it (outlined Type 3 copies).
+    render: str | None = None
+    outline: float = 0.0  # stroke width, in em
+
+
+@dataclass
+class Type3Info:
+    """What a Type 3 font (letters drawn as pictures) reproduces."""
+
+    family: str | None = None  # key of the family whose letters it draws
+    name: str | None = None
+    weight: int = 400
+    italic: bool = False
+    render: str | None = None  # "stroke" for outlined ("hollow") letters
+    outline: float = 0.0  # stroke width, in em
 
 
 @dataclass
@@ -53,8 +74,18 @@ class ChainItem:
     # Family this glyph source stands in for, when it is a substitute (look-alike,
     # generic or universal fallback) rather than a face of the family itself.
     stands_for: str | None = None
+    # Look-alike of a titling font (lowercase drawn as capitals): writes capitals.
+    caps: bool = False
+
+    def char_for(self, ch: str) -> str:
+        """Character actually written for `ch` with this glyph source."""
+        if self.caps and ch.islower() and len(ch.upper()) == 1:
+            return ch.upper()
+        return ch
 
     def covers(self, u: int) -> bool:
+        if self.caps:
+            u = ord(self.char_for(chr(u)))
         if self.codepoints is not None:
             return u in self.codepoints
         return bool(self.font.has_glyph(u))
@@ -70,6 +101,7 @@ class Family:
         self.exact_sys = self.sys_key == key
         # Installed family used in place of this one (metric-compatible alias or look-alike).
         self.substitute: str | None = self._alias_name()
+        self.similar: lookalike.Match | None = None
         self._similar_done = False
         self._slots: dict[tuple[int, bool], Slot] | None = None
 
@@ -78,6 +110,18 @@ class Family:
             faces = self.owner.index.faces_for_key(self.sys_key)
             if faces:
                 return faces[0].family
+        return None
+
+    @property
+    def caps(self) -> bool:
+        """The family draws lowercase letters as capitals (titling font)."""
+        return bool(self.similar and self.similar.caps)
+
+    def pending_download(self) -> str | None:
+        """Google Fonts family being downloaded to stand in for this one."""
+        m = self.similar
+        if m is not None and m.google and self.sys_key is None:
+            return m.key
         return None
 
     def slots(self) -> dict[tuple[int, bool], Slot]:
@@ -96,34 +140,41 @@ class Family:
                 self._similar_done = True
                 self._find_similar(slots)
             if self.sys_key:
-                for face in self.owner.index.faces_for_key(self.sys_key):
-                    slots.setdefault((face.weight, face.italic), Slot()).sys = face
+                faces = self.owner.index.faces_for_key(self.sys_key)
+                by_style = {(f.weight, f.italic): f for f in faces}
+                if self.similar is not None and self.similar.key == self.sys_key:
+                    # Each embedded face gets the look-alike face closest to it.
+                    for slot, style in self.owner.lookalike_faces(self).items():
+                        if style in by_style:
+                            slots.setdefault(slot, Slot()).sys = by_style[style]
+                for face in faces:
+                    slot = slots.setdefault((face.weight, face.italic), Slot())
+                    if slot.sys is None:
+                        slot.sys = face
             self._slots = slots
         return self._slots
 
     def _find_similar(self, slots: dict[tuple[int, bool], Slot]) -> None:
-        """Pick the installed family closest to the embedded subset, for its missing letters."""
+        """Pick the font that looks the most like the embedded subsets, for their missing letters."""
         if google_fonts().lookup(self.key):
             return  # the real font is being downloaded
-        candidates = sorted(
-            ((w, it, x) for (w, it), slot in slots.items() for x in slot.emb),
-            key=lambda t: (t[1], abs(t[0] - 400)),
-        )
-        for weight, italic, xref in candidates:
-            pf = self.owner.prepared(xref)
-            if not pf.usable or pf.font is None:
-                continue
-            widths = {
-                i: pf.font.glyph_advance(ord(c)) for i, c in enumerate(PROFILE_CHARS) if ord(c) in pf.codepoints
-            }
-            x_height = None
-            if ord("x") in pf.codepoints:
-                bbox = pf.font.glyph_bbox(ord("x"))
-                x_height = abs(bbox.y1 - bbox.y0) or None
-            found = self.owner.index.similar_family(widths, x_height, weight, italic, self.generic)
-            if found and found[2] < 0.2:
-                self.sys_key, self.substitute = found[0], found[1]
+        queries = {}
+        for slot, s in slots.items():
+            for xref in s.emb:
+                sig = self.owner.signature(xref)
+                if sig is not None and len(sig.glyphs) >= 3:
+                    queries[slot] = sig
+                    break
+        match = self.owner.lookalike(self.key, queries)
+        if match is None:
             return
+        self.similar = match
+        if self.owner.index.faces_for_key(match.key):
+            self.sys_key = match.key
+            self.substitute = self.owner.index.faces_for_key(match.key)[0].family
+        else:
+            self.substitute = match.name
+            google_fonts().ensure(match.key)  # in the background; the family refreshes once it is there
 
     def has_real_faces(self) -> bool:
         return bool(self.slots())
@@ -154,6 +205,7 @@ class Family:
             "substitute": self.substitute,
             "bold": any(w >= 600 for w, _ in slots),
             "italic": any(it for _, it in slots),
+            "caps": self.caps,
         }
 
 
@@ -166,12 +218,17 @@ class DocFonts:
         self._emb_by_key: dict[str, list[tuple[int, int, bool]]] | None = None
         self._reliable: dict[str, bool] = {}
         self._type3_names: set[str] = set()
+        self._type3_xrefs: dict[str, int] = {}
+        self._type3_info: dict[int, Type3Info] = {}
         # Fonts written by Plume as substitutes, mapped to the family they stand for.
         self._stand_ins: dict[str, str] = {}
         self._prepared: dict[int, PreparedFont] = {}
         self._span_cache: dict[tuple[str, int], FamRef] = {}
         self._fitz_sys: dict[str, pymupdf.Font] = {}
         self._chains: dict[tuple[str, int, bool], list[ChainItem]] = {}
+        self._signatures: dict[int, lookalike.Signature | None] = {}
+        self._lookalikes: dict[str, lookalike.Match | None] = {}
+        self._lookalike_faces: dict[str, dict[tuple[int, bool], tuple[int, bool]]] = {}
         self._generation = self.index.generation
 
     # ---------------------------------------------------------------- scanning
@@ -181,6 +238,7 @@ class DocFonts:
             self._emb_by_key = None
             self._reliable = {}
             self._type3_names = set()
+            self._type3_xrefs = {}
             self._stand_ins = {}
             self._span_cache.clear()
             self._chains.clear()
@@ -207,6 +265,8 @@ class DocFonts:
                     self._reliable[name] = self._reliable.get(name, True) and ok
                     if ftype == "Type3":
                         self._type3_names.add(name)
+                        self._type3_xrefs[name] = xref
+                        self._type3_xrefs[f"Type3 ({xref} 0 R)"] = xref
                         continue
                     if ext == "n/a":
                         continue
@@ -236,7 +296,66 @@ class DocFonts:
             if pf is None:
                 pf = prepare_font(self.doc, xref)
                 self._prepared[xref] = pf
+                sig = self.signature(xref)
+                if sig is not None and sig.caps_only() and add_case_aliases(pf):
+                    # Titling font: "a" and "A" are the same capital, whichever is typed.
+                    self._signatures.pop(xref, None)
             return pf
+
+    def signature(self, xref: int) -> lookalike.Signature | None:
+        """Picture-based signature of an embedded font (see lookalike.py)."""
+        with self._lock:
+            if xref not in self._signatures:
+                pf = self._prepared.get(xref) or self.prepared(xref)
+                sig = None
+                if pf.usable and pf.font is not None:
+                    try:
+                        sig = lookalike.font_signature(pf.font)
+                    except Exception as exc:
+                        log.debug("signature of font %s failed: %s", xref, exc)
+                self._signatures[xref] = sig
+            return self._signatures[xref]
+
+    def lookalike_faces(self, fam: Family) -> dict[tuple[int, bool], tuple[int, bool]]:
+        """Installed face of the look-alike family standing in for each embedded face."""
+        m = fam.similar
+        if m is None:
+            return {}
+        with self._lock:
+            cached = self._lookalike_faces.get(fam.key)
+            if cached is None:
+                queries = {}
+                for xref, weight, italic in self.embedded_for_key(fam.key):
+                    sig = self.signature(xref)
+                    pf = self.prepared(xref)
+                    if pf.font is not None and pf.font.is_bold and weight < 600:
+                        weight = 700
+                    if pf.font is not None and pf.font.is_italic:
+                        italic = True
+                    if sig is not None and len(sig.glyphs) >= 3:
+                        queries.setdefault((weight, italic), sig)
+                try:
+                    cached = lookalike.best_faces(self.index, m.key, queries, m.caps) or dict(m.faces)
+                except Exception as exc:
+                    log.debug("look-alike faces of %s: %s", fam.key, exc)
+                    cached = dict(m.faces)
+                self._lookalike_faces[fam.key] = cached
+            return cached
+
+    def lookalike(self, key: str, queries: dict[tuple[int, bool], lookalike.Signature]) -> lookalike.Match | None:
+        """Font family looking the most like the given faces of family `key`."""
+        with self._lock:
+            if key not in self._lookalikes:
+                match = None
+                if queries:
+                    try:
+                        match = lookalike.find_lookalike(queries, lookalike.candidates(self.index), exclude={key})
+                    except Exception as exc:
+                        log.warning("look-alike search failed for %s: %s", key, exc)
+                if match is not None:
+                    log.info("look-alike for %s: %s (%.2f)", key, match.name, match.score)
+                self._lookalikes[key] = match
+            return self._lookalikes[key]
 
     # ---------------------------------------------------------------- families
     def _refresh_if_fonts_added(self) -> None:
@@ -248,6 +367,7 @@ class DocFonts:
                 fam.sys_key = self.index.resolve_family_key(fam.key)
                 fam.exact_sys = fam.sys_key == fam.key
                 fam.substitute = fam._alias_name()
+                fam.similar = None
                 fam._similar_done = False
                 fam._slots = None
 
@@ -300,6 +420,13 @@ class DocFonts:
                 ref = FamRef(fam.key, info["weight"], info["italic"])
                 self._span_cache[cache_key] = ref
                 return ref
+            if self.is_type3(fontname):
+                t3 = self.type3_info(fontname)
+                if t3.family:
+                    fam = self.family(t3.family, t3.name, info["generic"])
+                    ref = FamRef(fam.key, t3.weight, t3.italic or info["italic"], t3.render, t3.outline)
+                    self._span_cache[cache_key] = ref
+                    return ref
             key = info["key"]
             if not strip_subset(fontname) or key in ("unknown",) or key.startswith("unnamed") or self.is_type3(fontname):
                 key = f"inconnue{info['generic']}"
@@ -311,6 +438,54 @@ class DocFonts:
             ref = FamRef(fam.key, info["weight"], info["italic"])
             self._span_cache[cache_key] = ref
         return ref
+
+    def type3_info(self, fontname: str) -> Type3Info:
+        """Family a Type 3 font copies, and whether it draws the letters as outlines.
+
+        Canva exports text with an outline effect as Type 3 glyphs whose font
+        descriptor still names the original font ("Intro"): the text is then
+        rewritten with that font, stroked instead of filled.
+        """
+        with self._lock:
+            self._scan()
+            xref = self._type3_xrefs.get(strip_subset(fontname)) or self._type3_xrefs.get(fontname)
+            if xref is None:
+                return Type3Info()
+            info = self._type3_info.get(xref)
+            if info is not None:
+                return info
+            info = Type3Info()
+            self._type3_info[xref] = info
+            name = _type3_font_name(self.doc, xref)
+            parsed = parse_font_name(name) if name else None
+            if parsed is None or parsed["key"] in ("", "unknown") or parsed["key"].startswith(("unnamed", "type3")):
+                return info
+            info.family, info.name = parsed["key"], parsed["name"]
+            info.weight, info.italic = parsed["weight"], parsed["italic"]
+            # Compare with the same letters of the real font, when we have it.
+            ref_font = None
+            emb = sorted(self._scan().get(info.family, []), key=lambda t: (t[2], abs(t[1] - info.weight)))
+            for exref, _w, _it in emb:
+                pf = self.prepared(exref)
+                if pf.usable and pf.font is not None:
+                    ref_font = pf.font
+                    break
+            if ref_font is None and self.index.resolve_family_key(info.family) == info.family:
+                faces = sorted(self.index.faces_for_key(info.family), key=lambda f: (f.italic, abs(f.weight - info.weight)))
+                if faces:
+                    ref_font = self.sys_font(faces[0])
+            if ref_font is not None:
+                try:
+                    found = lookalike.compare_type3(self.doc, xref, ref_font)
+                except Exception as exc:
+                    log.debug("type3 comparison failed for %s: %s", xref, exc)
+                    found = None
+                if found is not None:
+                    growth, ink = found
+                    if growth > 0.006:
+                        info.render = "stroke" if ink < 0.9 else "fillstroke"
+                        info.outline = round(growth, 4)
+            return info
 
     def generic_family(self, generic: str) -> Family | None:
         key = self.index.generic_key(generic)
@@ -337,18 +512,30 @@ class DocFonts:
         if slot.sys is not None:
             # A look-alike installed font stands for the family it replaces.
             sys_for = stands_for or (None if fam.exact_sys else fam.key)
-            items.append(ChainItem(self.sys_font(slot.sys), None, sb, si, f"sys:{slot.sys.id}", sys_for))
+            caps = fam.caps and not fam.exact_sys
+            items.append(ChainItem(self.sys_font(slot.sys), None, sb, si, f"sys:{slot.sys.id}", sys_for, caps))
         return items
+
+    def wait_for_downloads(self, keys: list[str]) -> None:
+        """Give the downloads of fonts standing in for these families a moment to finish."""
+        gf = google_fonts()
+        for key in keys:
+            if self.index.resolve_family_key(key) != key:
+                for candidate in ALIASES.get(key, [key]):
+                    if gf.lookup(candidate):
+                        gf.ensure(candidate, wait=DOWNLOAD_WAIT)
+                        break
+            with self._lock:
+                fam = self.family(key)
+                fam.slots()  # may start downloading a look-alike
+                pending = fam.pending_download()
+            if pending:
+                gf.ensure(pending, wait=DOWNLOAD_WAIT)
 
     def chain(self, key: str, weight: int, italic: bool) -> list[ChainItem]:
         ck = (key, int(weight), bool(italic))
-        if ck not in self._chains and self.index.resolve_family_key(key) != key:
-            # Give a pending Google Fonts download a moment before writing.
-            gf = google_fonts()
-            for candidate in ALIASES.get(key, [key]):
-                if gf.lookup(candidate):
-                    gf.ensure(candidate, wait=6.0)
-                    break
+        if ck not in self._chains:
+            self.wait_for_downloads([key])
         with self._lock:
             self._refresh_if_fonts_added()
             cached = self._chains.get(ck)
@@ -382,7 +569,9 @@ class DocFonts:
                         fmt = "opentype" if pf.web_mime == "font/otf" else "truetype"
                         rules.append(_face_rule(css_name, w, it, f"{doc_url}/fonts/emb/{xref}", fmt, pf.codepoints))
 
+        self.wait_for_downloads(keys)
         with self._lock:
+            self._refresh_if_fonts_added()
             for key in keys:
                 if key in done:
                     continue
@@ -395,6 +584,23 @@ class DocFonts:
             for ukey in self.index.universal_keys():
                 add_family("PF universal", self.family(ukey))
         return "\n".join(rules)
+
+
+def _type3_font_name(doc: pymupdf.Document, xref: int) -> str | None:
+    """Name of the font a Type 3 font was made from, from its descriptor."""
+    typ, val = doc.xref_get_key(xref, "FontDescriptor")
+    if typ == "xref":
+        desc = int(val.split()[0])
+        for key in ("FontName", "FontFamily"):
+            t, v = doc.xref_get_key(desc, key)
+            if t == "name" and v.strip("/"):
+                return strip_subset(v.lstrip("/"))
+            if t == "string" and v.strip():
+                return v.strip()
+    t, v = doc.xref_get_key(xref, "BaseFont")
+    if t == "name" and v.strip("/"):
+        return strip_subset(v.lstrip("/"))
+    return None
 
 
 def _postscript_name(doc: pymupdf.Document, xref: int) -> str | None:

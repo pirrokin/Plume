@@ -48,6 +48,9 @@ def font_dirs() -> list[Path]:
     extra = os.environ.get("PLUME_FONT_DIRS")
     if extra:
         dirs += [Path(p) for p in extra.split(os.pathsep) if p]
+    if os.environ.get("PLUME_SYSTEM_FONTS", "1") in ("0", "false", "no"):
+        # Only Plume's own fonts: reproduces a bare server on a workstation.
+        return [d for d in dirs if d.is_dir()]
     home = Path.home()
     if sys.platform == "darwin":
         dirs += [

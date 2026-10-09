@@ -752,6 +752,14 @@ button {
   border-bottom: 2px solid var(--accent);
   transform: rotate(-45deg);
 }
+.home-source {
+  margin: 22px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.home-source a {
+  color: var(--accent);
+}
 .close-doc {
   margin-left: -10px;
   color: var(--muted);

@@ -8,7 +8,10 @@ au reste de la page.
 ## Fonctionnalités
 
 - **Modification du texte par paragraphe** : le texte se recompose automatiquement (retour à la
-  ligne, justification, retrait de première ligne). Les lignes non modifiées restent intactes.
+  ligne, justification, retrait de première ligne). Les lignes non modifiées restent intactes,
+  et un paragraphe recomposé garde les mêmes retours à la ligne que l'original (Word place
+  les lettres un peu plus serrées que la police ne le prévoit : la largeur du bloc en tient
+  compte).
 - **Mise en forme** : police, taille, gras, italique, souligné, barré, couleur, alignement.
 - **Blocs** : déplacer, élargir, supprimer un bloc de texte ; ajouter du texte n'importe où.
 - **Images** : cliquer sur une image pour la sélectionner, la glisser pour la déplacer, tirer
@@ -16,9 +19,20 @@ au reste de la page.
 - **Polices** :
   - réutilisation des polices intégrées au PDF, y compris les sous-ensembles réparés
     (PDF créés sur Mac, Word, Canva…) ;
-  - police installée correspondante sinon (Times New Roman, Calibri, Arial…) ;
+  - police installée correspondante sinon (Times New Roman, Calibri, Arial…), ou son
+    équivalent libre aux mêmes dimensions (Arimo, Tinos, Carlito, Nimbus Sans…) ;
   - téléchargement automatique depuis Google Fonts quand la police est libre ;
-  - à défaut, police installée la plus ressemblante (largeurs des lettres, hauteur d'x).
+  - pour une police commerciale introuvable (Canva, Adobe, Microsoft), les lettres absentes
+    sont écrites avec la police libre qui lui **ressemble le plus à l'œil**. Les lettres du PDF
+    sont comparées en images (forme, largeur, graisse, empattements, inclinaison) à près de
+    700 familles de Google Fonts, et la gagnante est téléchargée à la demande. Exemples :
+    TT Chocolates → Quattrocento Sans, Intro → Figtree, Aptos → Funnel Sans,
+    Clear Sans → Kedebideri ;
+  - polices de titrage (tout en capitales) : une lettre absente s'écrit en capitale.
+- **Gros titres Canva** : un texte avec effet « contour » est exporté par Canva comme une police
+  Type 3 sans nom. Plume retrouve la police d'origine et l'épaisseur du contour : le titre
+  modifié reste en contour, dans sa police. Les copies invisibles du texte (calque de
+  sélection) sont effacées avec lui. Un titre sur deux lignes forme un seul paragraphe.
 - **Documents numérisés (OCR)** : reconnaissance du texte (français et anglais). La page
   devient consultable et ses paragraphes modifiables : la zone d'origine est repeinte à la
   couleur du papier, puis le nouveau texte est écrit à la couleur de l'encre.
@@ -64,9 +78,16 @@ Pour publier la version locale :
 ./deploy/o2switch.sh
 ```
 
-Le script construit l'interface, envoie les fichiers dans `~/plume-app` par SSH (clé
-`~/.ssh/o2switch_claude`), installe les dépendances dans l'environnement Python de
-l'application, la redémarre et vérifie qu'elle répond.
+Le compte SSH se règle dans `deploy/o2switch.env` (fichier non versionné) :
+
+```bash
+PLUME_SSH=utilisateur@serveur.o2switch.net
+PLUME_SSH_KEY=$HOME/.ssh/ma_cle
+```
+
+Le script construit l'interface, envoie les fichiers dans `~/plume-app` par SSH, installe les
+dépendances dans l'environnement Python de l'application, la redémarre et vérifie qu'elle
+répond.
 
 Mise en place d'origine, faite une seule fois :
 
@@ -112,6 +133,7 @@ renouvelle tout seul le certificat HTTPS.
 | `PLUME_GOOGLE_FONTS` | `1` | `0` pour ne jamais contacter Google Fonts |
 | `PLUME_OCR_LANGUAGES` | `fra+eng` | Langues de l'OCR (codes Tesseract) |
 | `PLUME_FONT_DIRS` | — | Dossiers de polices supplémentaires (séparés par `:`) |
+| `PLUME_SYSTEM_FONTS` | `1` | `0` pour ignorer les polices de l'ordinateur (reproduire un serveur nu) |
 | `PLUME_SECRET` | *(généré)* | Clé de signature des sessions |
 | `PLUME_COOKIE_SECURE` | `0` | `1` pour forcer les cookies HTTPS derrière un proxy |
 
@@ -128,7 +150,10 @@ Outils de mise au point (dossier `backend/tools`) :
 - `python -m tools.try_edit fichier.pdf 0 "début du bloc" "ancien" "nouveau" sortie` fait une
   modification et produit une image avant/après ;
 - `python -m tools.sweep ~/Documents` fait des modifications au hasard sur tous les PDF d'un
-  dossier, sur des copies en mémoire, et vérifie que le reste des pages ne change pas.
+  dossier, sur des copies en mémoire, et vérifie que le reste des pages ne change pas ;
+- `python -m tools.build_lookalikes 700` recalcule `plume/data/lookalikes.bin`, les signatures
+  des 700 familles Google Fonts les plus utilisées (quelques minutes, télécharge de petits
+  sous-ensembles de chaque police).
 
 ## Architecture
 
@@ -138,6 +163,7 @@ Outils de mise au point (dossier `backend/tools`) :
   - `layout.py` recompose le texte (coupure des lignes, justification) ;
   - `editor.py` et `writer.py` effacent et réécrivent le texte ;
   - `docfonts.py`, `pdffonts.py`, `fontindex.py` et `googlefonts.py` gèrent les polices ;
+    `lookalike.py` compare les polices en images pour trouver la plus ressemblante ;
   - `ocr.py` reconnaît le texte des scans ; `contentstream.py` et `images.py` déplacent les
     images ; `store.py` gère les sessions et les versions ; `app.py` expose l'API HTTP.
 - `frontend/` : interface React + TypeScript (Vite). `src/editor/richtext.ts` est l'éditeur de
@@ -148,14 +174,21 @@ Outils de mise au point (dossier `backend/tools`) :
 - Le texte tourné (vertical, en biais) n'est pas encore modifiable.
 - Un texte qui s'allonge peut chevaucher le contenu situé dessous, comme dans Acrobat :
   il faut alors élargir ou déplacer le bloc.
-- Les polices Type 3 (dessins de lettres, fréquentes dans les PDF exportés par Chrome) ne
-  peuvent pas être réutilisées : le texte modifié prend une police proche.
+- Les polices Type 3 (dessins de lettres) ne sont pas réutilisées telles quelles : le texte
+  modifié est écrit dans la police dont elles sont tirées quand le PDF l'indique (titres
+  Canva), sinon dans une police générique.
 - Quand une police intégrée ne contient pas une lettre et qu'elle n'est disponible nulle part,
   cette lettre est écrite avec une police ressemblante.
 
+## Prochaines étapes
+
+- **Ajout d'images** : insérer une image depuis son ordinateur (PNG et JPG pour commencer),
+  la placer sur la page, la redimensionner, puis la déplacer ou la supprimer comme les images
+  déjà présentes dans le PDF. L'image serait intégrée telle quelle, sans recompression.
+- Modification du texte orienté (vertical, en biais).
+
 ## Licence
 
-Plume utilise PyMuPDF, distribué sous licence AGPL. L'instance en ligne étant accessible à tous,
-l'AGPL impose que son code source soit disponible pour ses utilisateurs, par exemple dans un
-dépôt public avec un lien depuis la page d'accueil. L'autre option est une licence commerciale
-d'Artifex.
+Plume est distribué sous licence [GNU AGPL v3](LICENSE), comme PyMuPDF sur lequel il repose.
+L'instance en ligne étant accessible à tous, son code source est publié ici et la page
+d'accueil y renvoie.

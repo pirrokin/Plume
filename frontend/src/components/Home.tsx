@@ -89,6 +89,12 @@ export function Home({ onOpen }: Props) {
             d'inactivité).
           </li>
         </ul>
+        <p className="home-source">
+          Logiciel libre (licence AGPL) :{" "}
+          <a href="https://github.com/pirrokin/Plume" target="_blank" rel="noopener noreferrer">
+            code source
+          </a>
+        </p>
       </div>
     </div>
   );

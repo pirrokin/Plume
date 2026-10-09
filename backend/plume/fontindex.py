@@ -20,21 +20,20 @@ log = logging.getLogger(__name__)
 logging.getLogger("fontTools").setLevel(logging.ERROR)
 
 _EXTS = (".ttf", ".otf", ".ttc", ".otc")
-_CACHE_VERSION = 4
-
-# Characters whose advance widths describe the proportions of a typeface.
-PROFILE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+_CACHE_VERSION = 5
 
 # Alternatives tried, in order, when a family is not installed.
 # Metric-compatible open fonts come right after the original.
 ALIASES: dict[str, list[str]] = {
-    "helvetica": ["helvetica", "arial", "liberationsans", "arimo", "nimbussans", "texgyreheros"],
-    "helveticaneue": ["helveticaneue", "helvetica", "arial", "liberationsans"],
+    "helvetica": ["helvetica", "nimbussans", "texgyreheros", "arial", "liberationsans", "arimo"],
+    "helveticaneue": ["helveticaneue", "helvetica", "nimbussans", "texgyreheros", "arial", "liberationsans", "arimo"],
     "arial": ["arial", "liberationsans", "arimo", "helvetica", "nimbussans"],
+    "arialnarrow": ["arialnarrow", "liberationsansnarrow", "nimbussansnarrow", "archivonarrow"],
+    "helveticanarrow": ["helveticanarrow", "nimbussansnarrow", "arialnarrow", "liberationsansnarrow"],
     "timesnewroman": ["timesnewroman", "liberationserif", "tinos", "times", "nimbusroman"],
-    "times": ["times", "timesnewroman", "liberationserif", "tinos", "nimbusroman"],
-    "courier": ["courier", "couriernew", "liberationmono", "cousine", "nimbusmono"],
-    "couriernew": ["couriernew", "liberationmono", "cousine", "courier"],
+    "times": ["times", "timesnewroman", "nimbusroman", "liberationserif", "tinos"],
+    "courier": ["courier", "couriernew", "nimbusmonops", "liberationmono", "cousine"],
+    "couriernew": ["couriernew", "liberationmono", "cousine", "courier", "nimbusmonops"],
     "calibri": ["calibri", "carlito"],
     "cambria": ["cambria", "caladea"],
     "georgia": ["georgia", "gelasio"],
@@ -42,10 +41,19 @@ ALIASES: dict[str, list[str]] = {
     "verdana": ["verdana", "dejavusans"],
     "tahoma": ["tahoma", "dejavusans", "verdana"],
     "segoeui": ["segoeui", "opensans", "notosans", "helveticaneue"],
-    "centurygothic": ["centurygothic", "texgyreadventor", "urwgothic"],
-    "bookantiqua": ["bookantiqua", "palatino", "palatinolinotype", "texgyrepagella"],
-    "palatinolinotype": ["palatinolinotype", "palatino", "bookantiqua", "texgyrepagella"],
-    "palatino": ["palatino", "palatinolinotype", "bookantiqua", "texgyrepagella"],
+    "centurygothic": ["centurygothic", "urwgothic", "texgyreadventor"],
+    "avantgarde": ["avantgarde", "itcavantgardegothic", "urwgothic", "texgyreadventor", "centurygothic"],
+    "itcavantgardegothic": ["itcavantgardegothic", "avantgarde", "urwgothic", "texgyreadventor"],
+    "bookantiqua": ["bookantiqua", "palatino", "palatinolinotype", "p052", "texgyrepagella"],
+    "palatinolinotype": ["palatinolinotype", "palatino", "bookantiqua", "p052", "texgyrepagella"],
+    "palatino": ["palatino", "palatinolinotype", "bookantiqua", "p052", "texgyrepagella"],
+    "centuryschoolbook": ["centuryschoolbook", "newcenturyschoolbook", "c059", "texgyreschola"],
+    "newcenturyschoolbook": ["newcenturyschoolbook", "centuryschoolbook", "c059", "texgyreschola"],
+    "bookmanoldstyle": ["bookmanoldstyle", "bookman", "itcbookman", "urwbookman", "texgyrebonum"],
+    "bookman": ["bookman", "bookmanoldstyle", "itcbookman", "urwbookman", "texgyrebonum"],
+    "itcbookman": ["itcbookman", "bookman", "bookmanoldstyle", "urwbookman", "texgyrebonum"],
+    "zapfchancery": ["zapfchancery", "itczapfchancery", "z003"],
+    "itczapfchancery": ["itczapfchancery", "zapfchancery", "z003"],
     "liberationsans": ["liberationsans", "arial", "arimo"],
     "liberationserif": ["liberationserif", "timesnewroman", "tinos"],
     "liberationmono": ["liberationmono", "couriernew", "cousine"],
@@ -55,48 +63,43 @@ ALIASES: dict[str, list[str]] = {
     "carlito": ["carlito", "calibri"],
     "caladea": ["caladea", "cambria"],
     "symbol": ["symbol"],
-    "zapfdingbats": ["zapfdingbats"],
+    "zapfdingbats": ["zapfdingbats", "d050000l"],
     "dejavusans": ["dejavusans", "verdana"],
     "trebuchetms": ["trebuchetms", "trebuchet"],
     "lucidagrande": ["lucidagrande", "lucidasansunicode"],
-    "sfns": ["sfpro", "sfns", "helveticaneue"],
-    "sfprotext": ["sfprotext", "sfpro", "sfns", "helveticaneue"],
-    "sfprodisplay": ["sfprodisplay", "sfpro", "sfns", "helveticaneue"],
+    "menlo": ["menlo", "dejavusansmono"],
+    "interdisplay": ["interdisplay", "inter"],
+    "sfns": ["sfpro", "sfns", "helveticaneue", "inter"],
+    "sfprotext": ["sfprotext", "sfpro", "sfns", "helveticaneue", "inter"],
+    "sfprodisplay": ["sfprodisplay", "sfpro", "sfns", "helveticaneue", "inter"],
 }
 
 # Fallback families per generic class, in order of preference.
 GENERIC: dict[str, list[str]] = {
-    "sans": ["arial", "helvetica", "liberationsans", "arimo", "dejavusans", "notosans"],
-    "serif": ["timesnewroman", "times", "liberationserif", "tinos", "dejavuserif", "notoserif"],
-    "mono": ["couriernew", "courier", "liberationmono", "cousine", "dejavusansmono", "menlo"],
+    "sans": ["arial", "helvetica", "liberationsans", "arimo", "nimbussans", "dejavusans", "notosans"],
+    "serif": ["timesnewroman", "times", "liberationserif", "tinos", "nimbusroman", "dejavuserif", "notoserif"],
+    "mono": ["couriernew", "courier", "liberationmono", "cousine", "nimbusmonops", "dejavusansmono", "menlo"],
 }
 
 # Families with a very large coverage, used for characters missing everywhere else.
 UNIVERSAL = ["arialunicodems", "notosans", "dejavusans", "lucidagrande"]
 
-# Well-made Latin text families considered as look-alikes for fonts we cannot get.
-SIMILAR_CANDIDATES = {
-    "sans": [
-        "Arial", "Helvetica", "Helvetica Neue", "Avenir", "Avenir Next", "Futura", "Gill Sans", "Optima",
-        "Verdana", "Tahoma", "Trebuchet MS", "Calibri", "Aptos", "Century Gothic", "Franklin Gothic Book",
-        "Franklin Gothic Medium", "Segoe UI", "Candara", "Corbel", "Lucida Grande", "Lucida Sans", "Arial Narrow",
-        "Gill Sans MT", "Tw Cen MT", "Montserrat", "Lato", "Open Sans", "Roboto", "Source Sans 3", "Public Sans",
-        "DejaVu Sans", "Liberation Sans", "Arimo", "Carlito", "Noto Sans", "Inter", "Poppins", "Raleway",
-        "Nunito", "Work Sans", "PT Sans", "Fira Sans", "Ubuntu", "Quicksand", "Mulish", "Rubik", "Manrope",
-        "DM Sans", "Josefin Sans", "Barlow", "Oswald", "Kanit", "Karla", "Libre Franklin", "IBM Plex Sans",
-    ],
-    "serif": [
-        "Times New Roman", "Times", "Georgia", "Garamond", "Palatino", "Book Antiqua", "Baskerville", "Cambria",
-        "Constantia", "Charter", "Didot", "Bodoni 72", "Hoefler Text", "Iowan Old Style", "Big Caslon",
-        "Century Schoolbook", "Bookman Old Style", "Liberation Serif", "Tinos", "Caladea", "DejaVu Serif",
-        "Noto Serif", "Merriweather", "Lora", "PT Serif", "Source Serif 4", "EB Garamond", "Crimson Text",
-        "Playfair Display", "Libre Baskerville", "Cormorant Garamond", "Gelasio", "Athelas", "Sitka Text",
-    ],
-    "mono": [
-        "Courier New", "Courier", "Menlo", "Monaco", "Consolas", "Andale Mono", "Liberation Mono", "Cousine",
-        "DejaVu Sans Mono", "Source Code Pro", "Roboto Mono", "Fira Mono", "JetBrains Mono", "IBM Plex Mono",
-    ],
-}
+# Installed families that may stand in for fonts we cannot get (besides the
+# Google Fonts families of the look-alike catalog): well-made Latin text fonts.
+LOCAL_LOOKALIKES = [
+    "Arial", "Helvetica", "Helvetica Neue", "Avenir", "Avenir Next", "Futura", "Gill Sans", "Optima",
+    "Verdana", "Tahoma", "Trebuchet MS", "Calibri", "Aptos", "Century Gothic", "Franklin Gothic Book",
+    "Franklin Gothic Medium", "Segoe UI", "Candara", "Corbel", "Lucida Grande", "Lucida Sans", "Arial Narrow",
+    "Gill Sans MT", "Tw Cen MT", "DejaVu Sans", "DejaVu Sans Condensed", "Liberation Sans", "Nimbus Sans",
+    "Nimbus Sans Narrow", "URW Gothic", "TeX Gyre Heros", "TeX Gyre Adventor",
+    "Times New Roman", "Times", "Georgia", "Garamond", "Palatino", "Book Antiqua", "Baskerville", "Cambria",
+    "Constantia", "Charter", "Didot", "Bodoni 72", "Hoefler Text", "Iowan Old Style", "Big Caslon",
+    "Century Schoolbook", "Bookman Old Style", "Liberation Serif", "DejaVu Serif", "Athelas", "Sitka Text",
+    "Nimbus Roman", "P052", "C059", "URW Bookman", "TeX Gyre Termes", "TeX Gyre Pagella", "TeX Gyre Schola",
+    "TeX Gyre Bonum",
+    "Courier New", "Courier", "Menlo", "Monaco", "Consolas", "Andale Mono", "Liberation Mono",
+    "DejaVu Sans Mono", "Nimbus Mono PS",
+]
 
 # Families shown first in the font menu.
 POPULAR = [
@@ -122,8 +125,6 @@ class Face:
     cff: bool
     variable: bool
     keys: list[str] = field(default_factory=list)
-    # Advance widths (em) of PROFILE_CHARS (-1 when missing), then x-height and cap height.
-    profile: list[float] = field(default_factory=list)
 
     @property
     def ext(self) -> str:
@@ -186,21 +187,6 @@ def _describe(font: TTFont, path: str, index: int) -> Face | None:
     if "head" in font and font["head"].macStyle & 2:
         italic = True
     mono = bool("post" in font and font["post"].isFixedPitch)
-    profile: list[float] = []
-    try:
-        cmap = font.getBestCmap() or {}
-        hmtx = font["hmtx"].metrics
-        upem = font["head"].unitsPerEm or 1000
-        for ch in PROFILE_CHARS:
-            g = cmap.get(ord(ch))
-            profile.append(round(hmtx[g][0] / upem, 4) if g in hmtx else -1.0)
-        xh = cap = 0.0
-        if "OS/2" in font and getattr(font["OS/2"], "version", 0) >= 2:
-            xh = (font["OS/2"].sxHeight or 0) / upem
-            cap = (font["OS/2"].sCapHeight or 0) / upem
-        profile += [round(xh, 4), round(cap, 4)]
-    except Exception:
-        profile = []
     keys = []
     for n in (family, _best_name(name, 1), psname.split("-")[0] if psname else None):
         if n:
@@ -221,7 +207,6 @@ def _describe(font: TTFont, path: str, index: int) -> Face | None:
         cff="CFF " in font or "CFF2" in font,
         variable="fvar" in font,
         keys=keys,
-        profile=profile,
     )
 
 
@@ -353,40 +338,6 @@ class FontIndex:
     def face_for_psname(self, psname: str) -> Face | None:
         self.ensure_loaded()
         return self.by_ps.get(psname.lower())
-
-    def similar_family(self, widths: dict[int, float], x_height: float | None, weight: int, italic: bool,
-                       generic: str = "sans", exclude: set[str] | None = None) -> tuple[str, str, float] | None:
-        """Installed family whose letter proportions are closest to the given widths.
-
-        `widths` maps indexes of PROFILE_CHARS to advance widths in em.
-        Returns (family key, family name, error) or None.
-        """
-        self.ensure_loaded()
-        if len(widths) < 6:
-            return None
-        allowed = {family_key(n) for n in SIMILAR_CANDIDATES.get(generic, SIMILAR_CANDIDATES["sans"])}
-        families: dict[str, list[Face]] = {}
-        for face in self.faces.values():
-            key = family_key(face.family)
-            if face.profile and key in allowed:
-                families.setdefault(key, []).append(face)
-        total = sum(widths.values()) or 1.0
-        best: tuple[str, str, float] | None = None
-        for key, faces in families.items():
-            if exclude and key in exclude:
-                continue
-            face = min(faces, key=lambda f: (f.italic != italic, abs(f.weight - weight), f.variable))
-            prof = face.profile
-            common = [(w, prof[i]) for i, w in widths.items() if prof[i] > 0]
-            if len(common) < 0.9 * len(widths):
-                continue
-            err = sum(abs(a - b) for a, b in common) / total
-            if x_height and prof[-2] > 0:
-                err += 0.5 * abs(x_height - prof[-2]) / x_height
-            err += 0.05 * (face.italic != italic) + abs(face.weight - weight) / 2000.0
-            if best is None or err < best[2]:
-                best = (key, face.family, err)
-        return best
 
     def resolve_family_key(self, key: str) -> str | None:
         """First installed family among `key` and its aliases."""

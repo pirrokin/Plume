@@ -50,7 +50,7 @@ def _line_unchanged(seg: Segment, line: OutLine, align: str) -> bool:
     if len(old) != len(new):
         return False
     for c, g in zip(old, new):
-        fam, weight, italic, size, color, alpha, underline, strike, render = c.style
+        fam, weight, italic, size, color, alpha, underline, strike, render, outline = c.style
         st = g.style
         if (fam, weight, italic, round(size, 1), color, underline, strike) != (
             st["family"], st["weight"], st["italic"], round(st["size"], 1), st["color"], st["underline"], st["strike"]
@@ -174,15 +174,24 @@ def _trace_boxes(page: pymupdf.Page) -> dict[tuple[float, float], pymupdf.Rect]:
 def _restore(page: pymupdf.Page, fonts: DocFonts, chars: list[Char]) -> None:
     pieces = []
     for c in chars:
-        fam, weight, italic, size, color, alpha, underline, strike, render = c.style
+        fam, weight, italic, size, color, alpha, underline, strike, render, outline = c.style
         style = normalize_style({
             "family": fam, "weight": weight, "italic": italic, "size": size, "color": color,
-            "alpha": alpha, "render": render,
+            "alpha": alpha, "render": render, "outline": outline,
         })
         chain = fonts.chain(fam, weight, italic)
         item = next((i for i in chain if i.covers(ord(c.c))), chain[0])
-        pieces.append(Piece(c.x0, c.oy, c.c, item, style, [c.x1 - c.x0]))
+        pieces.append(Piece(c.x0, c.oy, item.char_for(c.c), item, style, [c.x1 - c.x0]))
     write_pieces(page, pieces, [])
+
+
+def _with_shadows(chars: list[Char]) -> list[Char]:
+    """Characters and the invisible copies lying under them."""
+    out = []
+    for c in chars:
+        out.append(c)
+        out.extend(c.shadows)
+    return out
 
 
 def scan_cover(segments: list[Segment]) -> list[pymupdf.Rect]:
@@ -218,7 +227,7 @@ def edit_block(
                 keep.add(i)
         if len(keep) == len(segments) == len(result.lines):
             return EditReport(len(keep), 0, 0, 0, result.bbox)
-    targets = [c for i, seg in enumerate(segments) if i not in keep for c in seg.chars]
+    targets = [c for i, seg in enumerate(segments) if i not in keep for c in _with_shadows(seg.chars)]
     restored = _remove_verified(page, fonts, targets)
     if paper is not None:
         for rect in scan_cover(segments):
@@ -234,7 +243,7 @@ def delete_block(
     doc: pymupdf.Document, fonts: DocFonts, page_no: int, segments: list[Segment], paper: str | None = None
 ) -> EditReport:
     page = doc[page_no]
-    targets = [c for seg in segments for c in seg.chars]
+    targets = [c for seg in segments for c in _with_shadows(seg.chars)]
     restored = _remove_verified(page, fonts, targets)
     if paper is not None:
         for rect in scan_cover(segments):

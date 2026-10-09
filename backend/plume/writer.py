@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 
 import pymupdf
@@ -76,17 +77,21 @@ def write_pieces(page: pymupdf.Page, pieces: list[Piece], decos: list[Deco]) -> 
         tw = groups[_group_key(piece)]
         _append(tw, piece)
     for key, tw in groups.items():
-        color, alpha, mode = key
+        color, alpha, mode, outline = key
+        before = set(page.get_contents())
         tw.write_text(page, color=_rgb(color), opacity=alpha, render_mode=mode, matrix=corr)
+        _set_outline(page, before, mode, outline)
     for piece in italic_pieces:
-        color, alpha, mode = _group_key(piece)
+        color, alpha, mode, outline = _group_key(piece)
         tw = pymupdf.TextWriter(page.rect)
         _append(tw, piece)
         # Shear about the piece's origin, expressed in TextWriter's PDF space.
         p = pymupdf.Point(piece.x, piece.y) * tw.ictm
         delta = pymupdf.Matrix(1, 1).pretranslate(p.x, p.y)
         shear = ~delta * pymupdf.Matrix(1, 0, SYNTH_ITALIC_SKEW, 1, 0, 0) * delta
+        before = set(page.get_contents())
         tw.write_text(page, color=_rgb(color), opacity=alpha, render_mode=mode, matrix=shear * corr)
+        _set_outline(page, before, mode, outline)
     for d in decos:
         _draw_deco(page, d)
     new_fonts = [xref for xref, *_ in page.get_fonts(full=True) if xref not in fonts_before]
@@ -185,9 +190,30 @@ def _cmap_bytes(mapping: dict[int, str]) -> bytes:
 def _group_key(piece: Piece) -> tuple:
     render = piece.style.get("render", "fill")
     mode = {"fill": 0, "stroke": 1, "fillstroke": 2, "invisible": 3}.get(render, 0)
+    outline = float(piece.style.get("outline") or 0.0) if mode in (1, 2) else 0.0
     if piece.item.synth_bold and mode == 0:
         mode = 2
-    return (piece.style["color"], float(piece.style["alpha"]), mode)
+    return (piece.style["color"], float(piece.style["alpha"]), mode, outline)
+
+
+# Line width PyMuPDF gives stroked text, as a share of the font size.
+_TEXTWRITER_STROKE = 0.05
+_LINE_WIDTH_RE = re.compile(rb"(?m)^(\d*\.?\d+) w$")
+
+
+def _set_outline(page: pymupdf.Page, before: set[int], mode: int, outline: float) -> None:
+    """Give stroked text just written the requested stroke width (in em)."""
+    if mode not in (1, 2) or outline <= 0:
+        return
+    factor = outline / _TEXTWRITER_STROKE
+    doc = page.parent
+    for xref in page.get_contents():
+        if xref in before:
+            continue
+        data = doc.xref_stream(xref) or b""
+        new = _LINE_WIDTH_RE.sub(lambda m: b"%.4g w" % (float(m.group(1)) * factor), data)
+        if new != data:
+            doc.update_stream(xref, new)
 
 
 def _append(tw: pymupdf.TextWriter, piece: Piece) -> None:
@@ -255,7 +281,7 @@ def decoration_rects(chars) -> list[pymupdf.Rect]:
     rects = []
     by_line: dict[tuple, list] = defaultdict(list)
     for c in chars:
-        fam, weight, italic, size, color, alpha, underline, strike, render = c.style
+        fam, weight, italic, size, color, alpha, underline, strike, render, outline = c.style
         if underline or strike:
             by_line[(round(c.oy, 1), underline, strike)].append(c)
     for (oy, underline, strike), cs in by_line.items():

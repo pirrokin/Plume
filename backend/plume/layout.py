@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 
 from .docfonts import ChainItem, DocFonts
 
-STYLE_KEYS = ("family", "weight", "italic", "size", "color", "alpha", "underline", "strike", "rise", "spacing", "render")
+STYLE_KEYS = (
+    "family", "weight", "italic", "size", "color", "alpha", "underline", "strike", "rise", "spacing", "render", "outline",
+)
 DEFAULT_STYLE = {
     "family": "arial", "weight": 400, "italic": False, "size": 12.0, "color": "#000000", "alpha": 1.0,
-    "underline": False, "strike": False, "rise": 0.0, "spacing": 0.0, "render": "fill",
+    "underline": False, "strike": False, "rise": 0.0, "spacing": 0.0, "render": "fill", "outline": 0.0,
 }
 EPS = 0.05
 
@@ -26,6 +28,7 @@ def normalize_style(run: dict) -> dict:
     style["alpha"] = max(0.0, min(float(style["alpha"] if style["alpha"] is not None else 1.0), 1.0))
     style["rise"] = float(style["rise"] or 0.0)
     style["spacing"] = float(style["spacing"] or 0.0)
+    style["outline"] = max(0.0, min(float(style["outline"] or 0.0), 0.5))  # stroke width, in em
     if style["render"] in (None, "invisible"):
         style["render"] = "fill"
     color = str(style["color"] or "#000000")
@@ -114,7 +117,8 @@ class _Shaper:
             ch = " "  # written as a plain space; tabs get a wider advance in _tokenize
         u = ord(ch)
         item = next((i for i in chain if i.covers(u)), chain[0])
-        adv = item.font.glyph_advance(u) * style["size"] + style["spacing"]
+        ch = item.char_for(ch)
+        adv = item.font.glyph_advance(ord(ch)) * style["size"] + style["spacing"]
         return Glyph(ch, style, item, adv)
 
 
@@ -183,6 +187,17 @@ def _break_lines(tokens: list[Token], width: float | None, first_indent: float) 
         cur_w += tok.width
     lines.append(cur)
     return lines
+
+
+def natural_width(runs: list[dict], fonts: DocFonts) -> float:
+    """Width of a line of text set with the fonts Plume writes with (no wrapping)."""
+    shaper = _Shaper(fonts)
+    chars = [(ch, normalize_style(r)) for r in runs for ch in str(r.get("text", "")) if ch not in "\n\r­"]
+    while chars and chars[-1][0].isspace():
+        chars.pop()
+    while chars and chars[0][0].isspace():
+        chars.pop(0)
+    return sum(t.width for t in _tokenize(chars, shaper))
 
 
 def layout(runs: list[dict], box: dict, fonts: DocFonts) -> LayoutResult:

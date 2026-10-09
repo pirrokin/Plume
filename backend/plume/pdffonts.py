@@ -56,8 +56,11 @@ def _resolve(doc: pymupdf.Document, xref: int, key: str) -> tuple[str, str]:
     return typ, val
 
 
+_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)"
+
+
 def _numbers(text: str) -> list[float]:
-    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", text)]
+    return [float(x) for x in re.findall(_NUMBER, text)]
 
 
 def _hex_to_str(h: str) -> str:
@@ -101,7 +104,7 @@ def parse_tounicode(data: bytes) -> dict[int, str]:
 
 def _parse_w_array(text: str) -> dict[int, float]:
     """Parse a CID font /W array."""
-    tokens = re.findall(r"\[|\]|-?\d+(?:\.\d+)?", text)
+    tokens = re.findall(r"\[|\]|" + _NUMBER, text)
     # Drop the outer brackets.
     if tokens and tokens[0] == "[":
         tokens = tokens[1:]
@@ -432,6 +435,40 @@ def prepare_font(doc: pymupdf.Document, xref: int) -> PreparedFont:
         pf.buffer = candidate
         pf.codepoints = codepoints
     return pf
+
+
+def add_case_aliases(pf: PreparedFont) -> bool:
+    """Titling font: give each letter's missing case the glyph of the other case.
+
+    Fonts like Canva's "Intro" draw lowercase letters as capitals, so the
+    subset holding "k" can also write "K". Returns whether letters were added.
+    """
+    if not pf.usable or pf.font is None or not pf.buffer:
+        return False
+    try:
+        tt = TTFont(io.BytesIO(pf.buffer), lazy=False)
+        cmap = _unicode_cmap(tt)
+        added: dict[int, str] = {}
+        for u in sorted(pf.codepoints):
+            if u not in cmap:
+                continue
+            for other in {chr(u).upper(), chr(u).lower()}:
+                o = ord(other) if len(other) == 1 else 0
+                if o and o != u and o not in pf.codepoints and o not in cmap:
+                    added.setdefault(o, cmap[u])
+        if not added:
+            return False
+        merged = dict(cmap)
+        merged.update(added)
+        _add_unicode_cmap(tt, merged)
+        data = _sfnt_bytes(tt)
+        font = pymupdf.Font(fontbuffer=data)
+    except Exception as exc:
+        log.debug("case aliases for font %s failed: %s", pf.xref, exc)
+        return False
+    pf.font, pf.buffer = font, data
+    pf.codepoints |= set(added)
+    return True
 
 
 _STD_GLYPH_RE = re.compile(r"^(?:[A-Za-z]{1,16}|uni[0-9A-Fa-f]{4,6}|u[0-9A-Fa-f]{4,6}|[A-Za-z]+\.(?:sc|alt|ss\d\d))$")

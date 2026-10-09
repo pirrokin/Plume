@@ -34,6 +34,8 @@ export interface Style {
   rise: number;
   spacing: number;
   render: string;
+  /** Stroke width of outlined text, in em (0: default). */
+  outline?: number;
 }
 
 export interface Run extends Style {
@@ -77,6 +79,8 @@ export interface FamilyInfo {
   italic?: boolean;
   popular?: boolean;
   substitute?: string | null;
+  /** Titling font: lowercase letters are drawn as capitals. */
+  caps?: boolean;
 }
 
 export interface PageImage {

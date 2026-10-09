@@ -34,6 +34,8 @@ CF_STROKED = 32
 _BULLET_CHARS = "•◦▪▫■□●○◆◇►▸▶➢➤✓✔❖-–—*·→⇒"
 _BULLET_RE = re.compile(r"^(?:[" + re.escape(_BULLET_CHARS) + r"]|\d{1,3}[.)]|[a-zA-Z][.)]|[ivxIVX]{1,5}[.)])$")
 _HYPHENS = ("-", "‐", "­")
+# Text at least this large is a title: one word per line is then a wrapped heading.
+TITLE_SIZE = 16.0
 _NUMERIC_RE = re.compile(r"^[\s\d.,:;/%+\-\u2013\u2014()€$£¥\u00a0\u202f]+(?:[A-Za-z]{0,3}\.?)?$")
 
 
@@ -46,11 +48,18 @@ class Char:
     top: float
     bottom: float
     size: float
-    style: tuple  # (family, weight, italic, size, color, alpha, underline, strike, render)
+    style: tuple  # (family, weight, italic, size, color, alpha, underline, strike, render, outline)
     font: str
     span_id: int
     synthetic: bool = False
     reliable: bool = True
+    # Invisible copies of this character (a selectable text layer drawn under
+    # outlined letters, as Canva does): removed together with it.
+    shadows: list["Char"] = field(default_factory=list)
+
+    @property
+    def invisible(self) -> bool:
+        return self.style[8] == "invisible" or self.style[5] <= 0.0
 
 
 @dataclass
@@ -183,6 +192,7 @@ def _page_segments(page: pymupdf.Page, fonts: DocFonts) -> tuple[list[Segment], 
     lines: list[tuple[float, float, list[Char]]] = []
     others: list[dict] = []
     span_id = 0
+    stroke_widths: dict[tuple[float, float], float] | None = None
     for block in raw["blocks"]:
         if block.get("type") != 0:
             continue
@@ -196,10 +206,26 @@ def _page_segments(page: pymupdf.Page, fonts: DocFonts) -> tuple[list[Segment], 
                 reliable = fonts.name_reliable(span["font"])
                 cf = span.get("char_flags", CF_FILLED)
                 size = round(span["size"], 2)
+                render = _style_render(cf)
+                alpha = round(span.get("alpha", 255) / 255.0, 3)
+                if render == "invisible" and fonts.is_type3(span["font"]):
+                    # Coloured Type 3 glyphs are drawn as pictures: MuPDF reports
+                    # their text as invisible although it shows on the page.
+                    render, alpha = "fill", 1.0
+                outline = 0.0
+                if fam.render and render != "invisible":
+                    render, outline = fam.render, fam.outline  # outlined Type 3 copy of a font
+                elif cf & CF_STROKED and span["chars"]:
+                    if stroke_widths is None:
+                        stroke_widths = _stroke_widths(page)
+                    for ch in span["chars"]:
+                        o = ch["origin"]
+                        outline = stroke_widths.get((round(o[0], 1), round(o[1], 1)), 0.0)
+                        if outline:
+                            break
                 style = (
-                    fam.key, fam.weight, fam.italic, size, _hex(span["color"]),
-                    round(span.get("alpha", 255) / 255.0, 3),
-                    bool(cf & CF_UNDERLINE), bool(cf & CF_STRIKE), _style_render(cf),
+                    fam.key, fam.weight, fam.italic, size, _hex(span["color"]), alpha,
+                    bool(cf & CF_UNDERLINE), bool(cf & CF_STRIKE), render, outline,
                 )
                 asc = span.get("ascender", 0.9)
                 desc = span.get("descender", -0.2)
@@ -224,6 +250,7 @@ def _page_segments(page: pymupdf.Page, fonts: DocFonts) -> tuple[list[Segment], 
             base, size = _dominant_baseline(chars)
             lines.append((base, size, chars))
 
+    lines = _fold_invisible_copies(lines)
     # Join MuPDF lines lying on the same baseline (MuPDF splits widely spaced
     # justified lines into several lines).
     lines.sort(key=lambda t: (round(t[0], 1), min(c.x0 for c in t[2])))
@@ -252,6 +279,60 @@ def _page_segments(page: pymupdf.Page, fonts: DocFonts) -> tuple[list[Segment], 
             segments.append(seg)
     _column_rights(segments)
     return segments, others
+
+
+def _stroke_widths(page: pymupdf.Page) -> dict[tuple[float, float], float]:
+    """Stroke width (in em) of outlined text, by character origin."""
+    out = {}
+    try:
+        for span in page.get_texttrace():
+            if span.get("type") not in (1, 2) or not span.get("size"):
+                continue
+            width = span.get("linewidth", 0.0) / span["size"]
+            if 0.005 <= width <= 0.2:  # else the page scale distorts it: keep the default
+                for _u, _g, origin, _bbox in span["chars"]:
+                    out[(round(origin[0], 1), round(origin[1], 1))] = round(width, 4)
+    except Exception:
+        pass
+    return out
+
+
+def _fold_invisible_copies(lines: list[tuple[float, float, list[Char]]]) -> list[tuple[float, float, list[Char]]]:
+    """Attach invisible characters lying exactly under the same visible character to it.
+
+    Text drawn with an effect is often doubled by an invisible copy that keeps
+    it selectable. Editing works on the visible text and removes both.
+    """
+    visible: dict[tuple[str, int], list[Char]] = {}
+    for _, _, chars in lines:
+        for c in chars:
+            if not c.invisible and not c.c.isspace():
+                visible.setdefault((c.c, round(c.oy)), []).append(c)
+    if not visible:
+        return lines
+    out = []
+    for base, size, chars in lines:
+        kept = []
+        for c in chars:
+            twin = None
+            if c.invisible and not c.c.isspace():
+                tol = max(0.5, 0.05 * c.size)
+                for dy in (0, -1, 1):
+                    for v in visible.get((c.c, round(c.oy) + dy), []):
+                        if abs(v.oy - c.oy) <= tol and abs(v.x0 - c.x0) <= tol and abs(v.size - c.size) <= tol:
+                            twin = v
+                            break
+                    if twin is not None:
+                        break
+            if twin is not None:
+                twin.shadows.append(c)
+            else:
+                kept.append(c)
+        if any(not c.c.isspace() for c in kept):
+            out.append((base, size, kept) if len(kept) != len(chars) else (base, size, chars))
+        elif len(kept) == len(chars):
+            out.append((base, size, chars))
+    return out
 
 
 def _split_row(chars: list[Char]) -> list[list[Char]]:
@@ -339,8 +420,9 @@ def _compatible(p: Para, seg: Segment) -> float | None:
         return None
     if _NUMERIC_RE.match(seg.text) and _NUMERIC_RE.match(last.text):
         return None  # stacked amounts / dates are table cells, not wrapped prose
-    if " " not in seg.text.strip() and " " not in last.text.strip() and max(seg.x1, last.x1) - min(seg.x0, last.x0) < 6 * s:
-        return None  # stacked one-word labels (plans, diagrams) are separate texts
+    if (" " not in seg.text.strip() and " " not in last.text.strip() and max(seg.x1, last.x1) - min(seg.x0, last.x0) < 6 * s
+            and s < TITLE_SIZE):
+        return None  # stacked one-word labels (plans, diagrams) are separate texts; big titles are not
     first_token = seg.text.split(" ", 1)[0]
     if len(first_token) <= 4 and _BULLET_RE.match(first_token):
         return None
@@ -402,12 +484,12 @@ def _runs_of(chars: list[Char], baseline: float) -> list[dict]:
             current["text"] += c.c
             current["_chars"].append(c)
             continue
-        fam, weight, italic, size, color, alpha, underline, strike, render = c.style
+        fam, weight, italic, size, color, alpha, underline, strike, render, outline = c.style
         current = {
             "_key": key, "_chars": [c],
             "text": c.c, "family": fam, "weight": weight, "italic": italic, "size": size,
             "color": color, "alpha": alpha, "underline": underline, "strike": strike,
-            "rise": rise, "spacing": 0.0, "render": render,
+            "rise": rise, "spacing": 0.0, "render": render, "outline": outline,
         }
         runs.append(current)
     for r in runs:
@@ -431,7 +513,9 @@ def _clean_runs(runs: list[dict]) -> list[dict]:
     return [{k: v for k, v in r.items() if not k.startswith("_")} for r in runs if r["text"]]
 
 
-_STYLE_KEYS = ("family", "weight", "italic", "size", "color", "alpha", "underline", "strike", "rise", "spacing", "render")
+_STYLE_KEYS = (
+    "family", "weight", "italic", "size", "color", "alpha", "underline", "strike", "rise", "spacing", "render", "outline",
+)
 
 
 def _same_style(a: dict, b: dict) -> bool:
@@ -447,8 +531,9 @@ def _paragraph_runs(lines: list[dict], wrap: bool) -> list[dict]:
             prev = out[-1]
             if prev["text"].endswith("­"):
                 prev["text"] = prev["text"][:-1]
-            elif prev["text"].endswith(_HYPHENS) and runs and runs[0]["text"][:1].islower():
-                pass
+            elif (prev["text"].endswith(_HYPHENS) and prev["text"][-2:-1].isalpha()
+                  and runs and runs[0]["text"][:1].isalpha()):
+                pass  # word broken at its hyphen ("Clermont-" / "Ferrand")
             else:
                 prev["text"] += " " if wrap else "\n"
         for r in runs:
@@ -496,6 +581,31 @@ def _alignment(p: Para) -> tuple[str, float]:
     if max(centers) - min(centers) <= 2 * tol:
         return "center", 0.0
     return "left", indent
+
+
+def _fit_lines(lines: list[dict], x0: float, x1: float, indent: float, align: str,
+               fonts: DocFonts) -> tuple[float, float]:
+    """Widen a paragraph's box so that each of its lines fits when set again.
+
+    The box is as wide as the longest line on the page, but the program that
+    made the PDF may have measured letters slightly narrower than the font
+    does (Word rounds its positions): re-wrapping the paragraph would then
+    push the last word of the longest line to the next one.
+    """
+    from .layout import natural_width
+
+    need = 0.0
+    for i, line in enumerate(lines):
+        need = max(need, natural_width(line["runs"], fonts) + (indent if i == 0 else 0.0))
+    width = x1 - x0
+    extra = min(need + 0.3 - width, max(1.0, 0.03 * width))  # a different font is not made to fit
+    if extra <= 0:
+        return x0, x1
+    if align == "right":
+        return x0 - extra, x1
+    if align == "center":
+        return x0 - extra / 2, x1 + extra / 2
+    return x0, x1 + extra
 
 
 def _block_issues(lines: list[Segment], fonts: DocFonts) -> tuple[list[str], bool]:
@@ -555,6 +665,8 @@ def extract_page(page: pymupdf.Page, fonts: DocFonts) -> dict:
         wrap = len(p.lines) > 1
         x0 = min(l.x0 for l in p.lines) if indent == 0 else p.body_x0
         x1 = max(l.x1 for l in p.lines)
+        if wrap:
+            x0, x1 = _fit_lines(lines_model, x0, x1, indent, align, fonts)
         line_height = p.spacing if p.spacing else round(1.2 * max(l.size for l in p.lines), 2)
         issues, editable = _block_issues(p.lines, fonts)
         scan = all(l.invisible for l in p.lines)

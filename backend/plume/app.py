@@ -16,8 +16,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, auth, config
-from .fontindex import SIMILAR_CANDIDATES, get_index
-from .fontnames import family_key, generic_class
+from . import lookalike
+from .fontindex import get_index
+from .fontnames import generic_class
 from .googlefonts import google_fonts
 from .store import MUPDF_LOCK, DocumentError, Store
 
@@ -55,13 +56,6 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Plume", version=__version__, lifespan=lifespan)
 
 
-LOOKALIKE_POOL = [
-    "montserrat", "lato", "opensans", "roboto", "poppins", "raleway", "nunito", "sourcesans3", "worksans",
-    "inter", "dmsans", "quicksand", "josefinsans", "ptsans", "merriweather", "lora", "ptserif", "ebgaramond",
-    "librebaskerville", "playfairdisplay", "crimsontext", "robotomono", "sourcecodepro",
-]
-
-
 def _warm_up() -> None:
     index = get_index()
     gf = google_fonts()
@@ -71,13 +65,9 @@ def _warm_up() -> None:
         if index.generic_key(generic) is None:
             for key in {"sans": ["arimo"], "serif": ["tinos"], "mono": ["cousine"]}[generic]:
                 gf.ensure(key)
-    # Few text fonts installed (a server): fetch popular open families once, so
-    # that commercial fonts missing from a PDF get a closer look-alike.
-    candidates = {family_key(n) for names in SIMILAR_CANDIDATES.values() for n in names}
-    installed = sum(1 for f in index.families() if f["key"] in candidates)
-    if installed < 25:
-        for key in LOOKALIKE_POOL:
-            gf.ensure(key)
+    # Signatures of the installed fonts that can stand in for missing ones.
+    with MUPDF_LOCK:
+        lookalike.candidates(index)
 
 
 @app.exception_handler(DocumentError)

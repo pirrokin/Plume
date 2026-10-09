@@ -138,6 +138,14 @@ class GoogleFonts:
         d = self.family_dir(key)
         return d.is_dir() and any(d.glob("*.ttf"))
 
+    def _index(self, key: str) -> None:
+        """Make a family downloaded earlier (maybe by another process) known to the index."""
+        from .fontindex import get_index
+
+        index = get_index()
+        if not index.faces_for_key(RENAMED.get(key, key)):
+            index.add_directory(self.family_dir(key))
+
     # ---------------------------------------------------------------- download
     def ensure(self, key: str, wait: float = 0.0) -> bool:
         """Download a family in the background; optionally wait for it."""
@@ -145,6 +153,7 @@ class GoogleFonts:
         if entry is None:
             return False
         if self.is_downloaded(key):
+            self._index(key)
             return True
         if time.time() - self._failed.get(key, 0) < 600:
             return False

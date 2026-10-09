@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Met en ligne la version locale de Plume sur o2switch (application Python cPanel).
 #   ./deploy/o2switch.sh
-# Réglages possibles : PLUME_SSH, PLUME_SSH_KEY, PLUME_APP_ROOT, PLUME_DOMAIN, PLUME_PYTHON
+# Réglages : PLUME_SSH (obligatoire, ex. utilisateur@serveur.o2switch.net), PLUME_SSH_KEY,
+# PLUME_APP_ROOT, PLUME_DOMAIN, PLUME_PYTHON. Ils peuvent être écrits dans deploy/o2switch.env
+# (fichier ignoré par git).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SSH_TARGET="${PLUME_SSH:-utilisateur@serveur.o2switch.net}"
-SSH_KEY="${PLUME_SSH_KEY:-$HOME/.ssh/o2switch_claude}"
+if [ -f deploy/o2switch.env ]; then
+  # shellcheck disable=SC1091
+  . deploy/o2switch.env
+fi
+SSH_TARGET="${PLUME_SSH:?Indiquez le compte SSH dans PLUME_SSH (ou dans deploy/o2switch.env)}"
+SSH_KEY="${PLUME_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 APP_ROOT="${PLUME_APP_ROOT:-plume-app}"
 DOMAIN="${PLUME_DOMAIN:-plume.kinam.fr}"
 PY="${PLUME_PYTHON:-3.12}"
