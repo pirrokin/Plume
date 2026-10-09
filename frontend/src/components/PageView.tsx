@@ -87,11 +87,17 @@ function PageViewInner(props: Props) {
   const editing = active && active.page === page.index ? active : null;
   const hide = editing?.block && !editing.closing ? editing.block.id : undefined;
   const [draggedImage, setDraggedImage] = useState<string | null>(null);
+  // Once a moved image is saved, the page has a new revision: show the normal
+  // picture again (the image is no longer hidden for the drag).
+  useEffect(() => {
+    setDraggedImage(null);
+  }, [page.rev]);
+  const hiddenImage = hide ? undefined : draggedImage ?? undefined;
   const scale = renderScale(zoom);
-  const src = visible ? api.imageUrl(docId, page.index, scale, page.rev, hide, draggedImage ?? undefined) : null;
+  const src = visible ? api.imageUrl(docId, page.index, scale, page.rev, hide, hiddenImage) : null;
   const [shownRev, setShownRev] = useState<string | null>(null);
   const shown = usePageImage(src, () => {
-    if (!hide && !draggedImage) {
+    if (!hide && !hiddenImage) {
       setShownRev(page.rev);
       props.onImageShown(page.index, page.rev);
     }
