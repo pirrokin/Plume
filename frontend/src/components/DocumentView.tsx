@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, Block, DocInfo, EditResult, FamilyInfo, PageModel, Run } from "../api";
 import { registerFamilies } from "../fonts";
-import { renderScale } from "../geometry";
 import type { ActiveEdit, EditorController, FormatState } from "./BlockEditor";
 import { FormatBar } from "./FormatBar";
 import { IconDownload, IconFeather, IconMinus, IconPlus, IconRedo, IconText, IconTextAdd, IconUndo } from "./icons";
 import { PageView, Tool } from "./PageView";
+import { PageOp, Sidebar } from "./Sidebar";
 import { useToasts } from "./Toasts";
 
 interface Props {
@@ -58,6 +58,7 @@ export function DocumentView({ docId, onExit }: Props) {
   const [busy, setBusy] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const [ocrPages, setOcrPages] = useState<Set<number>>(new Set());
+  const [pagesBusy, setPagesBusy] = useState(false);
   const controller = useRef<EditorController | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -96,8 +97,8 @@ export function DocumentView({ docId, onExit }: Props) {
   // Page text models, loaded when a page becomes visible and when it changes.
   const loadModel = useCallback(
     (index: number) => {
-      if (!info) return;
-      const rev = info.pages[index]?.rev;
+      if (!info || !info.pages[index]) return;
+      const rev = info.pages[index].rev;
       const key = `${index}:${rev}`;
       if (models[index]?.rev === rev || loading.current.has(key)) return;
       loading.current.add(key);
@@ -117,9 +118,19 @@ export function DocumentView({ docId, onExit }: Props) {
 
   useEffect(() => {
     // Reload models of visible pages after an edit / undo changed their revision.
+    if (!info) return;
+    const gone = Object.keys(models).map(Number).filter((i) => i >= info.pages.length);
+    if (gone.length) {
+      setModels((prev) => {
+        const next = { ...prev };
+        for (const i of gone) delete next[i];
+        return next;
+      });
+      return;
+    }
     for (const key of Object.keys(models)) {
       const i = Number(key);
-      if (info && models[i] && models[i].rev !== info.pages[i]?.rev) loadModel(i);
+      if (models[i] && models[i].rev !== info.pages[i].rev) loadModel(i);
     }
   }, [info, models, loadModel]);
 
@@ -216,6 +227,44 @@ export function DocumentView({ docId, onExit }: Props) {
   }, [info]);
 
   const closeEditor = useCallback(() => setActive(null), []);
+
+  const pageOp = useCallback(
+    async (page: number, op: PageOp) => {
+      if (!info) return;
+      if (activeRef.current && !(await commitActive())) return;
+      setPagesBusy(true);
+      try {
+        const next = await api.pageOp(docId, page, { version: info.version, ...op });
+        setActive(null);
+        setInfo(next);
+      } catch (e) {
+        fail(e);
+      } finally {
+        setPagesBusy(false);
+      }
+    },
+    [info, commitActive, docId, fail],
+  );
+
+  const merge = useCallback(
+    async (file: File) => {
+      if (!info) return;
+      if (activeRef.current && !(await commitActive())) return;
+      setPagesBusy(true);
+      try {
+        const before = info.pages.length;
+        const next = await api.merge(docId, file, info.version);
+        setActive(null);
+        setInfo(next);
+        toasts.show(`${next.pages.length - before} page(s) ajoutée(s) depuis « ${file.name} ».`, "success");
+      } catch (e) {
+        fail(e);
+      } finally {
+        setPagesBusy(false);
+      }
+    },
+    [info, commitActive, docId, fail, toasts],
+  );
 
   const runOcr = useCallback(
     async (page: number) => {
@@ -364,8 +413,6 @@ export function DocumentView({ docId, onExit }: Props) {
     );
   }
 
-  const thumbScale = renderScale(0.18);
-
   return (
     <div className="app">
       <header className="topbar">
@@ -423,27 +470,17 @@ export function DocumentView({ docId, onExit }: Props) {
       </div>
 
       <div className="workspace">
-        <aside className="sidebar">
-          {info.pages.map((p) => (
-            <button
-              key={p.index}
-              className={`thumb${currentPage === p.index ? " current" : ""}`}
-              onClick={() =>
-                scroller.current
-                  ?.querySelector(`[data-page="${p.index}"]`)
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-            >
-              <img
-                loading="lazy"
-                src={api.imageUrl(docId, p.index, thumbScale, p.rev)}
-                alt={`Page ${p.index + 1}`}
-                style={{ aspectRatio: `${p.width} / ${p.height}` }}
-              />
-              <span>{p.index + 1}</span>
-            </button>
-          ))}
-        </aside>
+        <Sidebar
+          docId={docId}
+          info={info}
+          currentPage={currentPage}
+          busy={pagesBusy}
+          onGoto={(i) =>
+            scroller.current?.querySelector(`[data-page="${i}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" })
+          }
+          onOp={pageOp}
+          onMerge={merge}
+        />
         <main className="pages" ref={scroller}>
           {info.pages.map((p) => (
             <PageView

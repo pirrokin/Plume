@@ -75,7 +75,8 @@ class Document:
             for page in self.doc:
                 h = hashlib.sha1(self.doc.xref_object(page.xref, compressed=True).encode())
                 for cx in page.get_contents():
-                    h.update(self.doc.xref_stream_raw(cx) or b"")
+                    # Decompressed, so that re-compressing on save does not change it.
+                    h.update(self.doc.xref_stream(cx) or b"")
                 typ, val = self.doc.xref_get_key(page.xref, "Resources")
                 if typ == "xref":
                     h.update(self.doc.xref_object(int(val.split()[0]), compressed=True).encode())
@@ -242,6 +243,56 @@ class Document:
         if not "".join(r.get("text", "") for r in runs).strip():
             raise DocumentError("Texte vide")
         return self._commit(lambda: add_block(self.doc, self.fonts, page_no, runs, box))
+
+    # ---------------------------------------------------------------- pages
+    def page_op(self, op: str, page_no: int, version: int | None, angle: int = 90, to: int | None = None) -> None:
+        self._check_version(version)
+        self._check_page(page_no)
+        count = self.doc.page_count
+
+        def action():
+            doc = self.doc
+            if op == "rotate":
+                if angle % 90:
+                    raise EditError("Angle de rotation invalide")
+                page = doc[page_no]
+                page.set_rotation((page.rotation + angle) % 360)
+            elif op == "delete":
+                if count == 1:
+                    raise EditError("Impossible de supprimer l'unique page du document.")
+                doc.delete_page(page_no)
+            elif op == "duplicate":
+                doc.fullcopy_page(page_no, page_no + 1 if page_no + 1 < count else -1)
+            elif op == "move":
+                if to is None or not 0 <= to < count:
+                    raise EditError("Position invalide")
+                if to != page_no:
+                    # PyMuPDF puts the page before `to` (-1: at the end).
+                    if to < page_no:
+                        doc.move_page(page_no, to)
+                    else:
+                        doc.move_page(page_no, to + 1 if to + 1 < count else -1)
+            elif op == "insert_blank":
+                ref = doc[page_no].rect
+                doc.new_page(pno=page_no + 1 if page_no + 1 < count else -1, width=ref.width, height=ref.height)
+            else:
+                raise EditError(f"Opération inconnue : {op}")
+
+        self._commit(action)
+
+    def merge(self, data: bytes, at: int | None, version: int | None) -> int:
+        """Insert all pages of another PDF; returns the number of pages added."""
+        self._check_version(version)
+        try:
+            other = pymupdf.open(stream=data, filetype="pdf")
+        except Exception as exc:
+            raise DocumentError("Ce fichier n'est pas un PDF valide.") from exc
+        if other.needs_pass:
+            raise DocumentError("Ce PDF est protégé par un mot de passe.")
+        added = other.page_count
+        start = self.doc.page_count if at is None else max(0, min(at, self.doc.page_count))
+        self._commit(lambda: self.doc.insert_pdf(other, start_at=start))
+        return added
 
     def undo(self) -> None:
         if self.cur == 0:

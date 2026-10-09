@@ -164,3 +164,28 @@ export const IconPages = icon(
     <path d="M9 21h9a2 2 0 002-2V8" />
   </>,
 );
+export const IconRotateLeft = icon(
+  <>
+    <path d="M4 4v5h5" />
+    <path d="M4.6 14a8 8 0 1 0 1.9-8.2L4 9" />
+  </>,
+);
+export const IconRotateRight = icon(
+  <>
+    <path d="M20 4v5h-5" />
+    <path d="M19.4 14a8 8 0 1 1-1.9-8.2L20 9" />
+  </>,
+);
+export const IconCopy = icon(
+  <>
+    <rect x="8" y="8" width="12" height="12" rx="2" />
+    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+  </>,
+);
+export const IconFilePlus = icon(
+  <>
+    <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
+    <path d="M14 3v5h5" />
+    <path d="M12 11v6M9 14h6" />
+  </>,
+);

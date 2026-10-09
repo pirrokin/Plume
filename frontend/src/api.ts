@@ -165,6 +165,13 @@ export const api = {
     request<EditResult>(`${base(id)}/pages/${page}/blocks`, json("POST", body)),
   ocr: (id: string, page: number, version: number) =>
     request<{ info: DocInfo; page: PageModel; words: number }>(`${base(id)}/pages/${page}/ocr`, json("POST", { version })),
+  pageOp: (id: string, page: number, body: { version: number; op: string; angle?: number; to?: number }) =>
+    request<DocInfo>(`${base(id)}/pages/${page}/op`, json("POST", body)),
+  merge(id: string, file: File, version: number): Promise<DocInfo> {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return request<DocInfo>(`${base(id)}/merge?version=${version}`, { method: "POST", body: form });
+  },
   undo: (id: string) => request<DocInfo>(`${base(id)}/undo`, { method: "POST" }),
   redo: (id: string) => request<DocInfo>(`${base(id)}/redo`, { method: "POST" }),
   fonts: () => request<FamilyInfo[]>("/api/fonts"),

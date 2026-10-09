@@ -60,3 +60,30 @@ def test_rejects_non_pdf(tmp_path):
     with open(p, "rb") as fh:
         r = client.post("/api/documents", files={"file": ("x.pdf", fh, "application/pdf")})
     assert r.status_code == 400
+
+
+def test_page_operations(sample_pdf):
+    info = _upload(sample_pdf)
+    doc_id = info["id"]
+    first_rev, second_rev = info["pages"][0]["rev"], info["pages"][1]["rev"]
+
+    def op(page, **body):
+        r = client.post(f"/api/documents/{doc_id}/pages/{page}/op", json=body)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    info = op(0, version=info["version"], op="rotate", angle=90)
+    assert info["pages"][0]["rotation"] == 90 and info["pages"][1]["rev"] == second_rev
+    info = op(0, version=info["version"], op="duplicate")
+    assert len(info["pages"]) == 3
+    info = op(0, version=info["version"], op="move", to=2)
+    assert info["pages"][2]["rotation"] == 90 and info["pages"][0]["rotation"] == 90
+    info = op(1, version=info["version"], op="delete")
+    assert len(info["pages"]) == 2
+    info = op(0, version=info["version"], op="insert_blank")
+    assert len(info["pages"]) == 3
+    with open(sample_pdf, "rb") as fh:
+        r = client.post(f"/api/documents/{doc_id}/merge", params={"version": info["version"]},
+                        files={"file": ("other.pdf", fh, "application/pdf")})
+    assert r.status_code == 200 and len(r.json()["pages"]) == 5
+    assert client.post(f"/api/documents/{doc_id}/undo").json()["pages"].__len__() == 3

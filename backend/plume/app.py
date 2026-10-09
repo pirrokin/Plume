@@ -213,6 +213,32 @@ def ocr(doc_id: str, page_no: int, body: OcrBody) -> dict:
         return {"info": doc.info(), "page": doc.public_model(page_no), "words": words}
 
 
+class PageOpBody(BaseModel):
+    version: int | None = None
+    op: str
+    angle: int = 90
+    to: int | None = None
+
+
+@app.post("/api/documents/{doc_id}/pages/{page_no}/op")
+def page_op(doc_id: str, page_no: int, body: PageOpBody) -> dict:
+    with MUPDF_LOCK:
+        doc = store.get(doc_id)
+        doc.page_op(body.op, page_no, body.version, body.angle, body.to)
+        return doc.info()
+
+
+@app.post("/api/documents/{doc_id}/merge")
+async def merge(doc_id: str, file: UploadFile = File(...), at: int | None = None, version: int | None = None) -> dict:
+    data = await file.read()
+    if len(data) > config.MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"Fichier trop volumineux (max {config.MAX_UPLOAD_MB} Mo).")
+    with MUPDF_LOCK:
+        doc = store.get(doc_id)
+        doc.merge(data, at, version)
+        return doc.info()
+
+
 @app.post("/api/documents/{doc_id}/undo")
 def undo(doc_id: str) -> dict:
     with MUPDF_LOCK:
